@@ -1,0 +1,13 @@
+[package]
+name = "clx"
+version = "0.1.0"
+edition = "2024"
+authors = ["jdx"]
+description = "Components for CLI applications"
+license = "MIT"
+repository = "https://github.com/jdx/clx"
+readme = "README.md"
+
+[dependencies]
+console = "0.15"
+tokio = { version = "1", features = ["sync", "rt"] }
