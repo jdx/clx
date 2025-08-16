@@ -823,6 +823,12 @@ fn flex(s: &str, width: usize) -> String {
                     width.saturating_sub(first_line_prefix_width + suffix_width);
 
                 let mut result = String::new();
+                
+                // If prefix alone exceeds width, truncate everything to fit
+                if first_line_prefix_width >= width {
+                    return console::truncate_str(prefix, width, "…").to_string();
+                }
+                
                 result.push_str(prefix);
 
                 if available_for_content > 3 {
@@ -861,6 +867,11 @@ fn flex(s: &str, width: usize) -> String {
             let suffix_width = console::measure_text_width(suffix);
             let available_for_content = width.saturating_sub(prefix_width + suffix_width);
 
+            // If prefix alone exceeds width, truncate the whole line
+            if prefix_width >= width {
+                return console::truncate_str(line, width, "…").to_string();
+            }
+            
             let mut result = String::new();
             result.push_str(prefix);
 
