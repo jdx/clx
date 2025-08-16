@@ -707,32 +707,11 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
             if content.len() <= max_len {
                 Ok(content.into())
             } else {
-                // Find the first newline to determine if this is multiline
-                if let Some(newline_pos) = content.find('\n') {
-                    // Multi-line content: truncate first line and show line count
-                    let first_line = &content[..newline_pos];
-                    let line_count = content.lines().count();
-                    let line_info = format!(" ({} more lines)", line_count - 1);
-                    let available_for_content = max_len.saturating_sub(line_info.len() + 1);
-
-                    if first_line.len() > available_for_content && available_for_content > 10 {
-                        Ok(
-                            format!("{}…{}", &first_line[..available_for_content], line_info)
-                                .into(),
-                        )
-                    } else if first_line.len() <= available_for_content {
-                        Ok(format!("{}…{}", first_line, line_info).into())
-                    } else {
-                        // Very short space, just show line count
-                        Ok(format!("…{}", line_info).into())
-                    }
+                // Simple truncation with ellipsis
+                if max_len > 1 {
+                    Ok(format!("{}…", &content[..max_len.saturating_sub(1)]).into())
                 } else {
-                    // Single line: simple truncation
-                    if max_len > 1 {
-                        Ok(format!("{}…", &content[..max_len.saturating_sub(1)]).into())
-                    } else {
-                        Ok("…".into())
-                    }
+                    Ok("…".into())
                 }
             }
         },
@@ -812,23 +791,20 @@ fn flex(s: &str, width: usize) -> String {
 
             // For multi-line content, truncate more aggressively
             if content_lines.len() > 1 {
-                let available_width = width.saturating_sub(first_line_prefix_width + 20); // Reserve space for "... (X more lines)"
+                let available_width = width.saturating_sub(first_line_prefix_width + 3); // Reserve space for ellipsis
 
                 let mut result = String::new();
                 result.push_str(prefix);
 
                 if let Some(first_content_line) = content_lines.first() {
-                    if available_width > 20 {
-                        // Show truncated first line with line count
+                    if available_width > 3 {
+                        // Show truncated first line
                         let truncated =
-                            console::truncate_str(first_content_line, available_width, "");
+                            console::truncate_str(first_content_line, available_width, "…");
                         result.push_str(&truncated);
-                        if content_lines.len() > 1 {
-                            result.push_str(&format!("… ({} more lines)", content_lines.len() - 1));
-                        }
                     } else {
-                        // Very narrow terminal, just show that there's more
-                        result.push_str("… (multi-line)");
+                        // Very narrow terminal
+                        result.push_str("…");
                     }
                 } else {
                     result.push_str(content);
