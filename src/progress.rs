@@ -842,21 +842,36 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
         "progress_bar",
         move |props: &HashMap<String, tera::Value>| {
             if let Some((progress_current, progress_total)) = progress {
-                let width = props
-                    .get("width")
+                let is_flex = props
+                    .get("flex")
                     .as_ref()
-                    .and_then(|v| v.as_i64())
-                    .map(|v| {
-                        if v < 0 {
-                            width - (-v as usize)
-                        } else {
-                            v as usize
-                        }
-                    })
-                    .unwrap_or(width);
-                let progress_bar =
-                    progress_bar::progress_bar(progress_current, progress_total, width);
-                Ok(progress_bar.into())
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if is_flex {
+                    // Defer width calculation to flex processor using a placeholder
+                    // Wrap with flex tags so callers don't need to pipe through the flex filter
+                    let placeholder = format!(
+                        "<clx:flex><clx:progress cur={} total={}><clx:flex>",
+                        progress_current, progress_total
+                    );
+                    Ok(placeholder.into())
+                } else {
+                    let width = props
+                        .get("width")
+                        .as_ref()
+                        .and_then(|v| v.as_i64())
+                        .map(|v| {
+                            if v < 0 {
+                                width - (-v as usize)
+                            } else {
+                                v as usize
+                            }
+                        })
+                        .unwrap_or(width);
+                    let progress_bar =
+                        progress_bar::progress_bar(progress_current, progress_total, width);
+                    Ok(progress_bar.into())
+                }
             } else {
                 Ok("".to_string().into())
             }
@@ -902,7 +917,7 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
             } else {
                 // Simple truncation with ellipsis
                 if max_len > 1 {
-                    Ok(format!("{}…", &content[..max_len.saturating_sub(1)]).into())
+                    Ok(format!("{}…", safe_prefix(&content, max_len.saturating_sub(1))).into())
                 } else {
                     Ok("…".into())
                 }
@@ -943,7 +958,8 @@ fn flex(s: &str, width: usize) -> String {
 
     debug!(chars = s.len(), width = width, "flex: processing");
     if s.len() > 100 {
-        trace!(first_100_chars = ?&s[..100], "flex: long content preview");
+        let preview = safe_prefix(s, 100);
+        trace!(first_100_chars = ?preview, "flex: long content preview");
     }
 
     // Process repeatedly until no tags remain or no progress can be made
@@ -1040,6 +1056,26 @@ fn flex_process_once(s: &str, width: usize) -> String {
                 let mut result = String::new();
                 result.push_str(prefix);
 
+                if content.starts_with("<clx:progress") {
+                    // Render a progress bar sized to the available space
+                    let mut cur: Option<usize> = None;
+                    let mut total: Option<usize> = None;
+                    // very small parser for attributes
+                    for part in content.trim_matches(['<', '>', ' ']).split_whitespace() {
+                        if let Some(v) = part.strip_prefix("cur=") {
+                            cur = v.parse::<usize>().ok();
+                        } else if let Some(v) = part.strip_prefix("total=") {
+                            total = v.parse::<usize>().ok();
+                        }
+                    }
+                    if let (Some(cur), Some(total)) = (cur, total) {
+                        let pb = progress_bar::progress_bar(cur, total, available_for_content);
+                        result.push_str(&pb);
+                        result.push_str(suffix);
+                        return result;
+                    }
+                }
+
                 if available_for_content > 3 {
                     result.push_str(&console::truncate_str(content, available_for_content, "…"));
                     result.push_str(suffix);
@@ -1096,6 +1132,22 @@ fn flex_process_once(s: &str, width: usize) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// Returns a prefix of s with at most max_bytes bytes, cutting only at char boundaries
+fn safe_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    match s
+        .char_indices()
+        .take_while(|(i, _)| *i < max_bytes)
+        .map(|(i, _)| i)
+        .last()
+    {
+        Some(last_boundary) => &s[..last_boundary],
+        None => "",
+    }
 }
 
 #[cfg(test)]
@@ -1165,5 +1217,33 @@ mod tests {
         assert!(width <= 50);
         // Should still contain some content
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_flex_progress_placeholder_basic() {
+        // Prefix + flexed progress + suffix should exactly fit the target width
+        let s = "prefix<clx:flex><clx:progress cur=5 total=10><clx:flex>suffix";
+        let target_width = 50;
+        let result = flex(s, target_width);
+        let width = console::measure_text_width(&result);
+        assert_eq!(width, target_width);
+        assert!(result.contains('[') && result.contains(']'));
+        assert!(!result.contains("<clx:progress"));
+    }
+
+    #[test]
+    fn test_flex_progress_placeholder_min_width() {
+        // Minimal width where available space for the bar is 2 characters
+        let prefix = "a"; // width 1
+        let suffix = "b"; // width 1
+        let s = format!(
+            "{}<clx:flex><clx:progress cur=1 total=1><clx:flex>{}",
+            prefix, suffix
+        );
+        let target_width = 4; // 1 (prefix) + 2 (bar brackets) + 1 (suffix)
+        let result = flex(&s, target_width);
+        let width = console::measure_text_width(&result);
+        assert_eq!(width, target_width);
+        assert!(!result.contains("<clx:progress"));
     }
 }
