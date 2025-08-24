@@ -1014,8 +1014,15 @@ fn flex_process_once(s: &str, width: usize) -> String {
             let suffix_lines: Vec<&str> = suffix.lines().collect();
 
             // Calculate the width available on the first line
+            // If the flex segment begins at the start of a new line, treat prefix width as 0.
+            // Rust's str::lines() drops a trailing empty line for a trailing '\n', so explicitly
+            // check the raw prefix for a trailing newline to detect this case.
             let first_line_prefix = prefix_lines.last().unwrap_or(&"");
-            let first_line_prefix_width = console::measure_text_width(first_line_prefix);
+            let first_line_prefix_width = if prefix.ends_with('\n') {
+                0
+            } else {
+                console::measure_text_width(first_line_prefix)
+            };
 
             // For multi-line content, truncate more aggressively
             if content_lines.len() > 1 {
