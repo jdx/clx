@@ -87,20 +87,6 @@ fn terminal_supports_osc_9_4() -> bool {
 /// # Arguments
 /// * `state` - The progress state to display
 /// * `progress` - Progress percentage (0-100), ignored if state is None or Indeterminate
-///
-/// # Example
-/// ```no_run
-/// use clx::osc::{set_progress, ProgressState};
-///
-/// // Show 50% progress with normal (blue/cyan) color
-/// set_progress(ProgressState::Normal, 50);
-///
-/// // Show indeterminate progress
-/// set_progress(ProgressState::Indeterminate, 0);
-///
-/// // Clear progress
-/// set_progress(ProgressState::None, 0);
-/// ```
 pub(crate) fn set_progress(state: ProgressState, progress: u8) {
     let progress = progress.min(100);
     let _ = write_progress(state, progress);
