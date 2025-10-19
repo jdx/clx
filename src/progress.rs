@@ -20,6 +20,23 @@ use tracing::{debug, trace};
 // Include OSC progress functionality
 use crate::osc::{ProgressState, clear_progress, set_progress};
 
+/// OSC progress tracing helper macros
+macro_rules! osc_trace {
+    ($($arg:tt)*) => {{
+        if std::env::var("CLX_TRACE_OSC").as_ref().map(|s| s == "1").unwrap_or(false) {
+            tracing::trace!(target: "clx::osc", $($arg)*);
+        }
+    }};
+}
+
+macro_rules! osc_debug {
+    ($($arg:tt)*) => {{
+        if std::env::var("CLX_TRACE_OSC").as_ref().map(|s| s == "1").unwrap_or(false) {
+            tracing::debug!(target: "clx::osc", $($arg)*);
+        }
+    }};
+}
+
 static DEFAULT_BODY: LazyLock<String> =
     LazyLock::new(|| "{{ spinner() }} {{ message }}".to_string());
 
@@ -811,14 +828,43 @@ pub fn stop_clear() {
 
 /// Updates OSC progress based on the current progress of all jobs
 fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
-    if !crate::osc::is_enabled() || jobs.is_empty() {
+    osc_debug!("update_osc_progress called with {} top-level jobs", jobs.len());
+    
+    if !crate::osc::is_enabled() {
+        osc_debug!("OSC progress is disabled, skipping update");
         return;
+    }
+    
+    if jobs.is_empty() {
+        osc_debug!("No jobs provided, skipping OSC update");
+        return;
+    }
+
+    // Use a simple loop-based approach to collect all jobs including children
+    let mut all_jobs: Vec<Arc<ProgressJob>> = Vec::new();
+    let mut stack: Vec<Arc<ProgressJob>> = jobs.iter().cloned().collect();
+
+    osc_debug!("Starting job collection with {} jobs in initial stack", stack.len());
+
+    while let Some(job) = stack.pop() {
+        all_jobs.push(job.clone());
+        // Add children to stack to process them too
+        let children = job.children.lock().unwrap();
+        let child_count = children.len();
+        osc_trace!("Processing job with {} children", child_count);
+        for child in children.iter() {
+            stack.push(child.clone());
+        }
     }
 
     let mut total_progress = 0.0f64;
     let mut job_count = 0;
+    let mut explicit_progress_count = 0;
+    let mut implicit_progress_count = 0;
 
-    for job in jobs {
+    osc_debug!("Collected {} total jobs including children", all_jobs.len());
+
+    for (idx, job) in all_jobs.iter().enumerate() {
         // For jobs with explicit progress (current/total), use that
         if let (Some(current), Some(total)) = (
             *job.progress_current.lock().unwrap(),
@@ -828,14 +874,36 @@ fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
                 let progress = (current as f64 / total as f64).clamp(0.0, 1.0);
                 total_progress += progress;
                 job_count += 1;
+                explicit_progress_count += 1;
+                osc_trace!(job_idx = idx, job_type = "explicit", current = current, total = total, progress = progress, "OSC progress contribution");
+            } else {
+                osc_debug!("Job {} has total=0, skipping", idx);
             }
         } else {
-            // For jobs without explicit progress (like indeterminate), treat as 50% progress
-            // so they contribute to overall progress calculation
-            total_progress += 0.5;
+            // For jobs without explicit progress (like indeterminate):
+            // - If job is running: treat as in-progress (50%)
+            // - If job is done/success: treat as complete (100%)  
+            // - If job is failed/error: treat as complete but might not count as "progress"
+            let status = job.status.lock().unwrap();
+            let progress = match &*status {
+                // Running jobs are in progress
+                ref s if s.is_running() => 0.5,
+                // Completed jobs are done
+                ref s if s.is_done() => 1.0,
+                // Failed jobs are done but don't count as "progress"
+                _ => 1.0,
+            };
+            total_progress += progress;
             job_count += 1;
+            implicit_progress_count += 1;
+            osc_trace!(job_idx = idx, job_type = "implicit", status = ?status, progress = progress, "OSC progress contribution");
         }
     }
+
+    osc_debug!(
+        "Progress calculation: {} jobs ({} explicit, {} implicit), total progress: {:.3}",
+        job_count, explicit_progress_count, implicit_progress_count, total_progress
+    );
 
     if job_count > 0 {
         let overall_percentage =
@@ -844,18 +912,31 @@ fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
 
         // Only send OSC update if percentage has changed
         if *last_pct != Some(overall_percentage) {
-            trace!(osc_percentage = overall_percentage, "Updating OSC progress");
+            osc_debug!(
+                "Sending OSC update: {}% ({} jobs, {:.3} total progress)",
+                overall_percentage, job_count, total_progress
+            );
             set_progress(ProgressState::Normal, overall_percentage);
             *last_pct = Some(overall_percentage);
+        } else {
+            osc_debug!(
+                "OSC unchanged: {}% ({} jobs, {:.3} total progress)",
+                overall_percentage, job_count, total_progress
+            );
         }
+    } else {
+        osc_debug!("No jobs to update OSC progress");
     }
 }
 
 /// Clear OSC progress indicator
 fn clear_osc_progress() {
     if crate::osc::is_enabled() {
+        osc_debug!("Clearing OSC progress");
         clear_progress();
         *LAST_OSC_PERCENTAGE.lock().unwrap() = None;
+    } else {
+        osc_debug!("OSC progress disabled, not clearing");
     }
 }
 
