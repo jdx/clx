@@ -6,9 +6,23 @@
 use std::io::Write;
 use std::sync::OnceLock;
 
+/// Global OSC progress enable/disable flag
+static OSC_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// Configure OSC progress functionality
+pub fn configure(enabled: bool) {
+    OSC_ENABLED
+        .set(enabled)
+        .expect("OSC_ENABLED already initialized");
+}
+
+/// Check if OSC progress is enabled
+pub(crate) fn is_enabled() -> bool {
+    *OSC_ENABLED.get_or_init(|| true)
+}
+
 /// OSC 9;4 states for terminal progress indication
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ProgressState {
     /// No progress indicator (clears any existing progress)
     None,
@@ -40,7 +54,7 @@ fn terminal_supports_osc_9_4() -> bool {
 
     *SUPPORTS_OSC_9_4.get_or_init(|| {
         // Check TERM_PROGRAM environment variable for terminal detection
-        if let Some(term_program) = std::env::var("TERM_PROGRAM").ok() {
+        if let Ok(term_program) = std::env::var("TERM_PROGRAM") {
             match term_program.as_str() {
                 // Supported terminals
                 "ghostty" => return true,
@@ -87,14 +101,14 @@ fn terminal_supports_osc_9_4() -> bool {
 /// // Clear progress
 /// set_progress(ProgressState::None, 0);
 /// ```
-pub fn set_progress(state: ProgressState, progress: u8) {
+pub(crate) fn set_progress(state: ProgressState, progress: u8) {
     let progress = progress.min(100);
     let _ = write_progress(state, progress);
 }
 
 fn write_progress(state: ProgressState, progress: u8) -> std::io::Result<()> {
-    // Only write OSC sequences if stderr is actually a terminal
-    if !console::user_attended_stderr() {
+    // Only write OSC sequences if enabled and stderr is actually a terminal
+    if !is_enabled() || !console::user_attended_stderr() {
         return Ok(());
     }
 
@@ -112,8 +126,10 @@ fn write_progress(state: ProgressState, progress: u8) -> std::io::Result<()> {
 }
 
 /// Clears any terminal progress indicator
-pub fn clear_progress() {
-    set_progress(ProgressState::None, 0);
+pub(crate) fn clear_progress() {
+    if is_enabled() {
+        set_progress(ProgressState::None, 0);
+    }
 }
 
 #[cfg(test)]
