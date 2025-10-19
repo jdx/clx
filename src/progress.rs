@@ -17,6 +17,9 @@ use indicatif::TermLike;
 use tera::{Context, Tera};
 use tracing::{debug, trace};
 
+// Include OSC progress functionality
+use crate::osc::{ProgressState, clear_progress, set_progress};
+
 static DEFAULT_BODY: LazyLock<String> =
     LazyLock::new(|| "{{ spinner() }} {{ message }}".to_string());
 
@@ -82,6 +85,9 @@ static STARTED: Mutex<bool> = Mutex::new(false);
 static PAUSED: AtomicBool = AtomicBool::new(false);
 static JOBS: Mutex<Vec<Arc<ProgressJob>>> = Mutex::new(vec![]);
 static TERA: Mutex<Option<Tera>> = Mutex::new(None);
+
+// OSC progress tracking state
+static LAST_OSC_PERCENTAGE: Mutex<Option<u8>> = Mutex::new(None);
 
 #[derive(Clone)]
 struct RenderContext {
@@ -611,6 +617,10 @@ fn refresh() -> Result<bool> {
     }
     let tera = tera.as_mut().unwrap();
     let jobs = JOBS.lock().unwrap().clone();
+
+    // Update OSC progress based on current job progress
+    update_osc_progress(&jobs);
+
     let any_running_check = || jobs.iter().any(|job| job.is_running());
     let any_running = any_running_check();
     let term = term();
@@ -697,6 +707,10 @@ fn refresh_once() -> Result<()> {
     ctx.lock().unwrap().now = Instant::now();
     let ctx = ctx.lock().unwrap().clone();
     let jobs = JOBS.lock().unwrap().clone();
+
+    // Update OSC progress based on current job progress
+    update_osc_progress(&jobs);
+
     let term = term();
     let mut lines = LINES.lock().unwrap();
     let output = jobs
@@ -783,6 +797,7 @@ pub fn stop() {
     // Stop the refresh loop and finalize a last frame synchronously
     STOPPING.store(true, Ordering::Relaxed);
     let _ = refresh_once();
+    clear_osc_progress();
     *STARTED.lock().unwrap() = false;
 }
 
@@ -790,7 +805,58 @@ pub fn stop_clear() {
     // Stop immediately and clear any progress from the screen
     STOPPING.store(true, Ordering::Relaxed);
     let _ = clear();
+    clear_osc_progress();
     *STARTED.lock().unwrap() = false;
+}
+
+/// Updates OSC progress based on the current progress of all jobs
+fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
+    if !crate::osc::is_enabled() || jobs.is_empty() {
+        return;
+    }
+
+    let mut total_progress = 0.0f64;
+    let mut job_count = 0;
+
+    for job in jobs {
+        // For jobs with explicit progress (current/total), use that
+        if let (Some(current), Some(total)) = (
+            *job.progress_current.lock().unwrap(),
+            *job.progress_total.lock().unwrap(),
+        ) {
+            if total > 0 {
+                let progress = (current as f64 / total as f64).clamp(0.0, 1.0);
+                total_progress += progress;
+                job_count += 1;
+            }
+        } else {
+            // For jobs without explicit progress (like indeterminate), treat as 50% progress
+            // so they contribute to overall progress calculation
+            total_progress += 0.5;
+            job_count += 1;
+        }
+    }
+
+    if job_count > 0 {
+        let overall_percentage =
+            (total_progress / job_count as f64 * 100.0).clamp(0.0, 100.0) as u8;
+        let mut last_pct = LAST_OSC_PERCENTAGE.lock().unwrap();
+
+        // Only send OSC update if percentage has changed
+        if *last_pct != Some(overall_percentage) {
+            trace!(osc_percentage = overall_percentage, "Updating OSC progress");
+            set_progress(ProgressState::Normal, overall_percentage);
+            *last_pct = Some(overall_percentage);
+        }
+    }
+}
+
+/// Clear OSC progress indicator
+fn clear_osc_progress() {
+    if crate::osc::is_enabled() {
+        clear_progress();
+        *LAST_OSC_PERCENTAGE.lock().unwrap() = None;
+    }
 }
 
 fn clear() -> Result<()> {
