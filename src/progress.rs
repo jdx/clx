@@ -843,7 +843,56 @@ fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
         return;
     }
 
-    // Use a simple loop-based approach to collect all jobs including children
+    // If the first top-level job has explicit progress, use that directly.
+    // This ensures OSC progress matches what's displayed in the header bar (cur/total).
+    if let (Some(current), Some(total)) = (
+        *jobs[0].progress_current.lock().unwrap(),
+        *jobs[0].progress_total.lock().unwrap(),
+    ) {
+        if total > 0 {
+            let overall_percentage =
+                (current as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as u8;
+            let mut last_pct = LAST_OSC_PERCENTAGE.lock().unwrap();
+
+            // Check for any failed jobs (including children) to determine OSC state
+            let has_failed_jobs = {
+                let mut stack: Vec<Arc<ProgressJob>> = jobs.to_vec();
+                let mut found_failed = false;
+                while let Some(job) = stack.pop() {
+                    if job.status.lock().unwrap().is_failed() {
+                        found_failed = true;
+                        break;
+                    }
+                    let children = job.children.lock().unwrap();
+                    for child in children.iter() {
+                        stack.push(child.clone());
+                    }
+                }
+                found_failed
+            };
+
+            let osc_state = if has_failed_jobs {
+                osc_debug!("Jobs failed, using OSC Error state");
+                ProgressState::Error
+            } else {
+                ProgressState::Normal
+            };
+
+            if *last_pct != Some(overall_percentage) || (has_failed_jobs && last_pct.is_none()) {
+                osc_debug!(
+                    "Sending OSC update from explicit progress: {}% ({}/{})",
+                    overall_percentage,
+                    current,
+                    total
+                );
+                set_progress(osc_state, overall_percentage);
+                *last_pct = Some(overall_percentage);
+            }
+            return;
+        }
+    }
+
+    // Fallback: use averaging algorithm for jobs without explicit progress
     let mut all_jobs: Vec<Arc<ProgressJob>> = Vec::new();
     let mut stack: Vec<Arc<ProgressJob>> = jobs.to_vec();
 
