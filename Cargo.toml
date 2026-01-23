@@ -26,7 +26,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 unicode-width = "0.2"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal", "user"] }
+nix = { version = "0.31", features = ["signal", "user"] }
 
 [dev-dependencies]
 test-log = "0.2"
