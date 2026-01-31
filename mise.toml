@@ -2,7 +2,7 @@
 run = [
   "cargo clippy",
   "cargo fmt --check",
-  "cargo test",
+  "cargo test -- --test-threads=1",
   "cargo run --example progress",
 ]
 
