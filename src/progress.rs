@@ -1210,8 +1210,40 @@ impl ProgressJob {
     /// job.set_status(ProgressStatus::Done);
     /// ```
     pub fn increment(&self, n: usize) {
-        let current = self.progress_current.lock().unwrap().unwrap_or(0);
-        self.progress_current(current + n);
+        // Hold the lock for the entire read-modify-write to avoid TOCTOU race
+        let mut current_guard = self.progress_current.lock().unwrap();
+        let current = current_guard.unwrap_or(0);
+        let mut new_current = current.saturating_add(n);
+
+        // Cap to total if set
+        if let Some(total) = *self.progress_total.lock().unwrap() {
+            new_current = new_current.min(total);
+        }
+
+        // Update smoothed rate for ETA calculation
+        let now = std::time::Instant::now();
+        {
+            let mut last_update = self.last_progress_update.lock().unwrap();
+            if let Some((last_time, last_value)) = *last_update {
+                let elapsed = now.duration_since(last_time).as_secs_f64();
+                if elapsed > 0.001 && new_current > last_value {
+                    let items_processed = (new_current - last_value) as f64;
+                    let instantaneous_rate = items_processed / elapsed;
+                    const ALPHA: f64 = 0.3;
+                    let mut smoothed = self.smoothed_rate.lock().unwrap();
+                    *smoothed = Some(match *smoothed {
+                        Some(old_rate) => ALPHA * instantaneous_rate + (1.0 - ALPHA) * old_rate,
+                        None => instantaneous_rate,
+                    });
+                }
+            }
+            *last_update = Some((now, new_current));
+        }
+
+        *current_guard = Some(new_current);
+        drop(current_guard);
+
+        self.prop("cur", &new_current);
     }
 
     /// Sets the message property.
