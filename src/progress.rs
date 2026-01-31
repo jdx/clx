@@ -4,6 +4,90 @@
 //! Progress jobs can be nested hierarchically, support animated spinners, and use
 //! Tera templates for customizable rendering.
 //!
+//! # Quick Start
+//!
+//! ```rust,no_run
+//! use clx::progress::{ProgressJobBuilder, ProgressStatus};
+//!
+//! // Create and start a progress job
+//! let job = ProgressJobBuilder::new()
+//!     .prop("message", "Processing...")
+//!     .start();
+//!
+//! // Update the message
+//! job.prop("message", "Almost done...");
+//!
+//! // Mark as complete
+//! job.set_status(ProgressStatus::Done);
+//! ```
+//!
+//! # Hierarchical Progress
+//!
+//! Jobs can have child jobs for nested progress display:
+//!
+//! ```rust,no_run
+//! use clx::progress::{ProgressJobBuilder, ProgressStatus};
+//!
+//! let parent = ProgressJobBuilder::new()
+//!     .prop("message", "Building project")
+//!     .start();
+//!
+//! let child = parent.add(
+//!     ProgressJobBuilder::new()
+//!         .prop("message", "Compiling src/main.rs")
+//!         .build()
+//! );
+//!
+//! child.set_status(ProgressStatus::Done);
+//! parent.set_status(ProgressStatus::Done);
+//! ```
+//!
+//! # Custom Templates
+//!
+//! Progress jobs use [Tera](https://tera.netlify.app/) templates for rendering:
+//!
+//! ```rust,no_run
+//! use clx::progress::ProgressJobBuilder;
+//!
+//! let job = ProgressJobBuilder::new()
+//!     .body("{{ spinner() }} [{{ cur }}/{{ total }}] {{ message | cyan }}")
+//!     .prop("message", "Building")
+//!     .prop("cur", &0)
+//!     .prop("total", &10)
+//!     .start();
+//! ```
+//!
+//! ## Available Template Functions
+//!
+//! - `spinner(name='...')` - Animated spinner (default: `mini_dot`)
+//! - `progress_bar(flex=true)` - Progress bar that fills available width
+//! - `progress_bar(width=N)` - Fixed-width progress bar
+//! - `elapsed()` - Time since job started (e.g., "1m23s")
+//! - `eta()` - Estimated time remaining
+//! - `rate()` - Throughput rate (e.g., "42.5/s")
+//! - `bytes()` - Progress as human-readable bytes (e.g., "5.2 MB / 10.4 MB")
+//!
+//! ## Available Template Filters
+//!
+//! - `{{ text | flex }}` - Truncates to fit available width
+//! - `{{ text | flex_fill }}` - Pads to fill available width
+//! - Color: `cyan`, `blue`, `green`, `yellow`, `red`, `magenta`
+//! - Style: `bold`, `dim`, `underline`
+//!
+//! # Output Modes
+//!
+//! The progress system supports two output modes:
+//!
+//! - [`ProgressOutput::UI`] - Rich terminal UI with animations (default)
+//! - [`ProgressOutput::Text`] - Simple text output for non-interactive environments
+//!
+//! ```rust,no_run
+//! use clx::progress::{set_output, ProgressOutput};
+//!
+//! // Use text mode for CI environments
+//! set_output(ProgressOutput::Text);
+//! ```
+//!
 //! # Threading Model
 //!
 //! The progress system is designed for safe concurrent access from multiple threads.
@@ -21,33 +105,33 @@
 //! │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                 │
 //! │         │                │                │                         │
 //! │         ▼                ▼                ▼                         │
-//! │  ┌────────────────────────────────────────────────────┐            │
-//! │  │              JOBS (Mutex<Vec<Arc<ProgressJob>>>)   │            │
-//! │  │  • Stores all top-level jobs                       │            │
-//! │  │  • Each job has interior mutability via Mutex      │            │
-//! │  └────────────────────────────────────────────────────┘            │
+//! │  ┌────────────────────────────────────────────────────────────────┐│
+//! │  │              JOBS (Mutex<Vec<Arc<ProgressJob>>>)               ││
+//! │  │  • Stores all top-level jobs                                   ││
+//! │  │  • Each job has interior mutability via Mutex                  ││
+//! │  └────────────────────────────────────────────────────────────────┘│
 //! │                          │                                          │
 //! │                          │ notify()                                 │
 //! │                          ▼                                          │
-//! │  ┌────────────────────────────────────────────────────┐            │
-//! │  │              NOTIFY (mpsc::Sender)                 │            │
-//! │  │  • Wakes background thread for immediate refresh   │            │
-//! │  └────────────────────────────────────────────────────┘            │
+//! │  ┌────────────────────────────────────────────────────────────────┐│
+//! │  │              NOTIFY (mpsc::Sender)                             ││
+//! │  │  • Wakes background thread for immediate refresh               ││
+//! │  └────────────────────────────────────────────────────────────────┘│
 //! └─────────────────────────────────────────────────────────────────────┘
 //!                            │
 //!                            ▼
 //! ┌─────────────────────────────────────────────────────────────────────┐
 //! │                      Background Thread                              │
-//! │  ┌────────────────────────────────────────────────────┐            │
-//! │  │                   refresh()                        │            │
-//! │  │  1. Acquire REFRESH_LOCK                           │            │
-//! │  │  2. Clone JOBS snapshot                            │            │
-//! │  │  3. Render all jobs via Tera                       │            │
-//! │  │  4. Acquire TERM_LOCK                              │            │
-//! │  │  5. Clear previous output + write new              │            │
-//! │  │  6. Release TERM_LOCK                              │            │
-//! │  │  7. Wait on NOTIFY or timeout (INTERVAL)           │            │
-//! │  └────────────────────────────────────────────────────┘            │
+//! │  ┌────────────────────────────────────────────────────────────────┐│
+//! │  │                   refresh()                                    ││
+//! │  │  1. Acquire REFRESH_LOCK                                       ││
+//! │  │  2. Clone JOBS snapshot                                        ││
+//! │  │  3. Render all jobs via Tera                                   ││
+//! │  │  4. Acquire TERM_LOCK                                          ││
+//! │  │  5. Clear previous output + write new                          ││
+//! │  │  6. Release TERM_LOCK                                          ││
+//! │  │  7. Wait on NOTIFY or timeout (INTERVAL)                       ││
+//! │  └────────────────────────────────────────────────────────────────┘│
 //! └─────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -372,9 +456,40 @@ static LINES: Mutex<usize> = Mutex::new(0);
 /// - The lock is automatically acquired by `println()` method on jobs
 static TERM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-/// Execute the provided function while holding the global terminal lock.
-/// This allows external crates to synchronize stderr writes (e.g., logging)
-/// with clx's progress clear/write operations to avoid interleaved output.
+/// Executes a function while holding the global terminal lock.
+///
+/// Use this to synchronize your own stderr/stdout writes with the progress display
+/// to prevent interleaved or corrupted output. The progress display will not update
+/// while the lock is held.
+///
+/// # Returns
+///
+/// Returns the value returned by the provided function.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use clx::progress::with_terminal_lock;
+///
+/// // Safe to write to stderr without interfering with progress
+/// with_terminal_lock(|| {
+///     eprintln!("Log message that won't be overwritten");
+/// });
+/// ```
+///
+/// # Integration with Logging
+///
+/// For integration with logging frameworks, you can wrap your logger's output:
+///
+/// ```rust,no_run
+/// use clx::progress::with_terminal_lock;
+///
+/// fn log_message(msg: &str) {
+///     with_terminal_lock(|| {
+///         eprintln!("[LOG] {}", msg);
+///     });
+/// }
+/// ```
 #[must_use]
 pub fn with_terminal_lock<F, R>(f: F) -> R
 where
@@ -461,6 +576,29 @@ impl RenderContext {
     }
 }
 
+/// Builder for creating progress jobs.
+///
+/// Use this builder to configure a progress job before starting it. The builder
+/// follows the builder pattern, allowing method chaining for a fluent API.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use clx::progress::{ProgressJobBuilder, ProgressStatus, ProgressJobDoneBehavior};
+///
+/// // Simple job with default template
+/// let job = ProgressJobBuilder::new()
+///     .prop("message", "Processing...")
+///     .start();
+///
+/// // Job with custom template and progress tracking
+/// let job = ProgressJobBuilder::new()
+///     .body("{{ spinner() }} {{ message }} {{ progress_bar(flex=true) }}")
+///     .prop("message", "Downloading")
+///     .progress_total(100)
+///     .on_done(ProgressJobDoneBehavior::Collapse)
+///     .start();
+/// ```
 #[must_use]
 pub struct ProgressJobBuilder {
     body: String,
@@ -492,6 +630,10 @@ impl fmt::Debug for ProgressJobBuilder {
 }
 
 impl ProgressJobBuilder {
+    /// Creates a new progress job builder with default settings.
+    ///
+    /// The default template is `{{ spinner() }} {{ message }}` with status
+    /// [`ProgressStatus::Running`] and done behavior [`ProgressJobDoneBehavior::Keep`].
     pub fn new() -> Self {
         Self {
             body: DEFAULT_BODY.clone(),
@@ -504,41 +646,117 @@ impl ProgressJobBuilder {
         }
     }
 
+    /// Sets the Tera template for rendering the job body.
+    ///
+    /// The template has access to all properties set via [`prop`](Self::prop), plus
+    /// built-in functions like `spinner()`, `progress_bar()`, `elapsed()`, etc.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::ProgressJobBuilder;
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .body("{{ spinner() }} [{{ cur }}/{{ total }}] {{ message }}")
+    ///     .prop("message", "Building")
+    ///     .prop("cur", &0)
+    ///     .prop("total", &10)
+    ///     .start();
+    /// ```
     pub fn body<S: Into<String>>(mut self, body: S) -> Self {
         self.body = body.into();
         self
     }
 
+    /// Sets an alternative template for text output mode.
+    ///
+    /// When [`ProgressOutput::Text`] is active, this template is used instead of
+    /// the main body. This allows you to provide a simpler format for non-interactive
+    /// environments like CI systems.
+    ///
+    /// If not set, the main body template is used in text mode as well.
     pub fn body_text(mut self, body: Option<impl Into<String>>) -> Self {
         self.body_text = body.map(|s| s.into());
         self
     }
 
+    /// Sets the initial status of the job.
+    ///
+    /// Defaults to [`ProgressStatus::Running`].
     pub fn status(mut self, status: ProgressStatus) -> Self {
         self.status = status;
         self
     }
 
+    /// Sets the behavior when the job completes.
+    ///
+    /// - [`Keep`](ProgressJobDoneBehavior::Keep) - Keep the job visible (default)
+    /// - [`Collapse`](ProgressJobDoneBehavior::Collapse) - Hide children, keep job visible
+    /// - [`Hide`](ProgressJobDoneBehavior::Hide) - Remove the job from display
     pub fn on_done(mut self, on_done: ProgressJobDoneBehavior) -> Self {
         self.on_done = on_done;
         self
     }
 
+    /// Sets the current progress value.
+    ///
+    /// This also sets the `cur` template variable for use in custom templates.
+    /// Use with [`progress_total`](Self::progress_total) to enable progress tracking.
     pub fn progress_current(mut self, progress_current: usize) -> Self {
         self.progress_current = Some(progress_current);
         self.prop("cur", &progress_current)
     }
 
+    /// Sets the total progress value.
+    ///
+    /// This also sets the `total` template variable for use in custom templates.
+    /// Use with [`progress_current`](Self::progress_current) to enable progress tracking.
     pub fn progress_total(mut self, progress_total: usize) -> Self {
         self.progress_total = Some(progress_total);
         self.prop("total", &progress_total)
     }
 
+    /// Sets a template property (variable).
+    ///
+    /// Properties are available in the Tera template as variables. The value must
+    /// implement [`Serialize`](serde::Serialize).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::ProgressJobBuilder;
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .prop("message", "Building")
+    ///     .prop("filename", "main.rs")
+    ///     .prop("line_count", &42)
+    ///     .start();
+    /// ```
     pub fn prop<T: SerializeTrait + ?Sized, S: Into<String>>(mut self, key: S, val: &T) -> Self {
         self.ctx.insert(key, val);
         self
     }
 
+    /// Builds the progress job without starting it.
+    ///
+    /// Use this when you want to add the job as a child of another job via
+    /// [`ProgressJob::add`]. For top-level jobs, use [`start`](Self::start) instead.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::ProgressJobBuilder;
+    ///
+    /// let parent = ProgressJobBuilder::new()
+    ///     .prop("message", "Parent task")
+    ///     .start();
+    ///
+    /// let child = parent.add(
+    ///     ProgressJobBuilder::new()
+    ///         .prop("message", "Child task")
+    ///         .build()
+    /// );
+    /// ```
     #[must_use = "the returned ProgressJob should be used or stored"]
     pub fn build(self) -> ProgressJob {
         static ID: AtomicUsize = AtomicUsize::new(0);
@@ -557,6 +775,24 @@ impl ProgressJobBuilder {
         }
     }
 
+    /// Builds and starts the progress job as a top-level job.
+    ///
+    /// The job is immediately added to the display and will start rendering.
+    /// Returns an `Arc<ProgressJob>` that can be used to update the job.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::{ProgressJobBuilder, ProgressStatus};
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .prop("message", "Processing...")
+    ///     .start();
+    ///
+    /// // Do work...
+    ///
+    /// job.set_status(ProgressStatus::Done);
+    /// ```
     #[must_use = "the returned job handle is needed to control the job"]
     pub fn start(self) -> Arc<ProgressJob> {
         let job = Arc::new(self.build());
@@ -566,33 +802,102 @@ impl ProgressJobBuilder {
     }
 }
 
+/// Status of a progress job.
+///
+/// The status determines how the job is displayed (spinner icon, colors) and
+/// whether it's considered "active" (still running).
+///
+/// # Status Icons
+///
+/// Each status renders a different icon via the `spinner()` template function:
+///
+/// - `Running` - Animated spinner (⠋⠙⠹⠸...)
+/// - `Pending` - Paused indicator (⏸)
+/// - `Done` - Green checkmark (✔)
+/// - `Failed` - Red X (✗)
+/// - `Warn` - Yellow warning (⚠)
+/// - `Hide` - Space (hidden)
 #[derive(Debug, Default, Clone, PartialEq, strum::EnumIs)]
 pub enum ProgressStatus {
+    /// Hidden status - the job is not displayed.
     Hide,
+    /// Paused/pending status - shows a pause indicator.
     Pending,
+    /// Running status (default) - shows an animated spinner.
     #[default]
     Running,
+    /// Running with a custom spinner character.
     RunningCustom(String),
+    /// Done with a custom completion character.
     DoneCustom(String),
+    /// Successfully completed - shows a green checkmark.
     Done,
+    /// Completed with warnings - shows a yellow warning icon.
     Warn,
+    /// Failed - shows a red X.
     Failed,
 }
 
 impl ProgressStatus {
+    /// Returns `true` if the job is still active (running).
+    ///
+    /// Active jobs keep the refresh loop running and animate their spinners.
+    /// Only `Running` and `RunningCustom` are considered active.
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Running | Self::RunningCustom(_))
     }
 }
 
+/// Behavior when a progress job completes (transitions to a non-active status).
+///
+/// This determines how the job and its children are displayed after completion.
 #[derive(Debug, Default, PartialEq)]
 pub enum ProgressJobDoneBehavior {
+    /// Keep the job and all children visible (default).
+    ///
+    /// The job remains on screen with its completion icon, and all child jobs
+    /// remain visible beneath it.
     #[default]
     Keep,
+    /// Keep the job visible but hide its children.
+    ///
+    /// Useful for tasks where you want to show completion but don't need to
+    /// show the subtask details anymore.
     Collapse,
+    /// Remove the job from display entirely.
+    ///
+    /// The job disappears from the progress display once it completes. Useful
+    /// for transient tasks that don't need to remain visible.
     Hide,
 }
 
+/// A progress job handle for updating and controlling an active progress indicator.
+///
+/// `ProgressJob` represents an active progress indicator in the display. Jobs are
+/// typically created via [`ProgressJobBuilder`] and stored as `Arc<ProgressJob>`.
+///
+/// # Thread Safety
+///
+/// All methods on `ProgressJob` are thread-safe. You can clone the `Arc` and update
+/// the job from multiple threads.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use clx::progress::{ProgressJobBuilder, ProgressJob, ProgressStatus};
+/// use std::sync::Arc;
+///
+/// let job: Arc<ProgressJob> = ProgressJobBuilder::new()
+///     .prop("message", "Starting...")
+///     .start();
+///
+/// // Update from another thread
+/// let job_clone = job.clone();
+/// std::thread::spawn(move || {
+///     job_clone.prop("message", "Working...");
+///     job_clone.set_status(ProgressStatus::Done);
+/// });
+/// ```
 pub struct ProgressJob {
     id: usize,
     body: Mutex<String>,
@@ -659,6 +964,37 @@ impl ProgressJob {
         self.status.lock().unwrap().is_active() || self.on_done == ProgressJobDoneBehavior::Keep
     }
 
+    /// Adds a child job to this job.
+    ///
+    /// Child jobs are displayed indented beneath their parent. When the parent's
+    /// done behavior is [`Collapse`](ProgressJobDoneBehavior::Collapse), children
+    /// are hidden when the parent completes.
+    ///
+    /// # Arguments
+    ///
+    /// * `job` - A `ProgressJob` created via [`ProgressJobBuilder::build`]
+    ///
+    /// # Returns
+    ///
+    /// Returns an `Arc<ProgressJob>` handle for the child job.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::{ProgressJobBuilder, ProgressStatus};
+    ///
+    /// let parent = ProgressJobBuilder::new()
+    ///     .prop("message", "Building")
+    ///     .start();
+    ///
+    /// let child = parent.add(
+    ///     ProgressJobBuilder::new()
+    ///         .prop("message", "Compiling main.rs")
+    ///         .build()
+    /// );
+    ///
+    /// child.set_status(ProgressStatus::Done);
+    /// ```
     pub fn add(self: &Arc<Self>, mut job: ProgressJob) -> Arc<Self> {
         job.parent = Arc::downgrade(self);
         let job = Arc::new(job);
@@ -667,6 +1003,14 @@ impl ProgressJob {
         job
     }
 
+    /// Removes this job from the display.
+    ///
+    /// If this is a child job, it's removed from its parent's children list.
+    /// If this is a top-level job, it's removed from the global jobs list.
+    ///
+    /// Note: This immediately removes the job without changing its status. If you
+    /// want the job to complete normally, use [`set_status`](Self::set_status) with
+    /// [`ProgressJobDoneBehavior::Hide`] instead.
     pub fn remove(&self) {
         if let Some(parent) = self.parent.upgrade() {
             parent
@@ -679,20 +1023,49 @@ impl ProgressJob {
         }
     }
 
+    /// Returns a clone of the children jobs list.
     #[must_use]
     pub fn children(&self) -> Vec<Arc<Self>> {
         self.children.lock().unwrap().clone()
     }
 
+    /// Returns `true` if the job is still running (active).
+    ///
+    /// A job is running if its status is [`Running`](ProgressStatus::Running) or
+    /// [`RunningCustom`](ProgressStatus::RunningCustom).
     pub fn is_running(&self) -> bool {
         self.status.lock().unwrap().is_active()
     }
 
+    /// Replaces the job's Tera template body.
+    ///
+    /// This allows dynamically changing how the job is rendered.
     pub fn set_body<S: Into<String>>(&self, body: S) {
         *self.body.lock().unwrap() = body.into();
         self.update();
     }
 
+    /// Sets the job's status.
+    ///
+    /// Changing status updates the display immediately. For terminal statuses
+    /// (`Done`, `Failed`, `Warn`, `DoneCustom`), a synchronous render is performed
+    /// to ensure the final state is visible.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::{ProgressJobBuilder, ProgressStatus};
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .prop("message", "Working...")
+    ///     .start();
+    ///
+    /// // Mark as complete
+    /// job.set_status(ProgressStatus::Done);
+    ///
+    /// // Or mark as failed
+    /// // job.set_status(ProgressStatus::Failed);
+    /// ```
     pub fn set_status(&self, status: ProgressStatus) {
         let mut s = self.status.lock().unwrap();
         if *s != status {
@@ -713,6 +1086,27 @@ impl ProgressJob {
         }
     }
 
+    /// Sets a template property (variable).
+    ///
+    /// This updates the value available in the Tera template and triggers a display
+    /// update. The value must implement [`Serialize`](serde::Serialize).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::ProgressJobBuilder;
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .body("{{ spinner() }} {{ message }} ({{ count }} items)")
+    ///     .prop("message", "Processing")
+    ///     .prop("count", &0)
+    ///     .start();
+    ///
+    /// // Update the count as work progresses
+    /// for i in 1..=100 {
+    ///     job.prop("count", &i);
+    /// }
+    /// ```
     pub fn prop<T: SerializeTrait + ?Sized, S: Into<String>>(&self, key: S, val: &T) {
         let mut ctx = self.tera_ctx.lock().unwrap();
         ctx.insert(key, val);
@@ -720,6 +1114,27 @@ impl ProgressJob {
         self.update();
     }
 
+    /// Updates the current progress value.
+    ///
+    /// The value is clamped to not exceed the total. This also updates the `cur`
+    /// template variable.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::{ProgressJobBuilder, ProgressStatus};
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .body("{{ spinner() }} {{ message }} {{ progress_bar(flex=true) }}")
+    ///     .prop("message", "Downloading")
+    ///     .progress_total(100)
+    ///     .start();
+    ///
+    /// for i in 0..=100 {
+    ///     job.progress_current(i);
+    /// }
+    /// job.set_status(ProgressStatus::Done);
+    /// ```
     pub fn progress_current(&self, mut current: usize) {
         if let Some(total) = *self.progress_total.lock().unwrap() {
             current = current.min(total);
@@ -728,6 +1143,10 @@ impl ProgressJob {
         self.prop("cur", &current); // prop() calls update()
     }
 
+    /// Updates the total progress value.
+    ///
+    /// The value is adjusted to be at least as large as the current progress.
+    /// This also updates the `total` template variable.
     pub fn progress_total(&self, mut total: usize) {
         if let Some(current) = *self.progress_current.lock().unwrap() {
             total = total.max(current);
@@ -736,6 +1155,10 @@ impl ProgressJob {
         self.prop("total", &total); // prop() calls update()
     }
 
+    /// Triggers a display update for this job.
+    ///
+    /// This is called automatically by other methods like [`prop`](Self::prop) and
+    /// [`set_status`](Self::set_status). You typically don't need to call this directly.
     pub fn update(&self) {
         if STOPPING.load(Ordering::Relaxed) {
             return;
@@ -774,6 +1197,23 @@ impl ProgressJob {
         }
     }
 
+    /// Prints a line to stderr without interfering with the progress display.
+    ///
+    /// This method pauses progress rendering, prints the message, then resumes.
+    /// Use this for log messages or other output that should appear between
+    /// progress updates.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::ProgressJobBuilder;
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .prop("message", "Working...")
+    ///     .start();
+    ///
+    /// job.println("Found 42 files to process");
+    /// ```
     pub fn println(&self, s: &str) {
         if !s.is_empty() {
             pause();
@@ -900,6 +1340,10 @@ fn notify_wait(timeout: Duration) -> bool {
     rx.recv_timeout(timeout).is_ok()
 }
 
+/// Forces an immediate refresh of the progress display.
+///
+/// Normally the display refreshes automatically at the configured interval.
+/// Call this if you need to ensure the display is up-to-date immediately.
 pub fn flush() {
     if !*STARTED.lock().unwrap() {
         return;
@@ -1143,19 +1587,47 @@ fn term() -> &'static Term {
     &TERM
 }
 
+/// Returns the current refresh interval.
+///
+/// The default interval is 200ms, which matches the fastest spinner frame rate.
 #[must_use]
 pub fn interval() -> Duration {
     *INTERVAL.lock().unwrap()
 }
 
+/// Sets the refresh interval for the progress display.
+///
+/// Shorter intervals provide smoother animation but use more CPU. The default
+/// of 200ms is a good balance for most use cases.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use clx::progress::set_interval;
+/// use std::time::Duration;
+///
+/// // Faster refresh for smoother animation
+/// set_interval(Duration::from_millis(100));
+///
+/// // Slower refresh to reduce CPU usage
+/// set_interval(Duration::from_millis(500));
+/// ```
 pub fn set_interval(interval: Duration) {
     *INTERVAL.lock().unwrap() = interval;
 }
 
+/// Returns `true` if progress rendering is currently paused.
 pub fn is_paused() -> bool {
     PAUSED.load(Ordering::Relaxed)
 }
 
+/// Pauses progress rendering and clears the display.
+///
+/// While paused, the progress display is cleared from the screen but jobs continue
+/// to exist and can be updated. Use [`resume`] to restore the display.
+///
+/// This is useful when you need to display other content (like prompts or logs)
+/// without the progress display interfering.
 pub fn pause() {
     PAUSED.store(true, Ordering::Relaxed);
     if *STARTED.lock().unwrap() {
@@ -1163,6 +1635,9 @@ pub fn pause() {
     }
 }
 
+/// Resumes progress rendering after a pause.
+///
+/// The display is immediately refreshed to show the current state of all jobs.
 pub fn resume() {
     PAUSED.store(false, Ordering::Relaxed);
     if !*STARTED.lock().unwrap() {
@@ -1173,6 +1648,13 @@ pub fn resume() {
     }
 }
 
+/// Stops the progress display and renders the final state.
+///
+/// This stops the background refresh loop, renders one final frame to show the
+/// current state of all jobs, and clears the OSC progress indicator.
+///
+/// Call this when your application is done with progress display to ensure the
+/// final state is visible.
 pub fn stop() {
     // Stop the refresh loop and finalize a last frame synchronously
     STOPPING.store(true, Ordering::Relaxed);
@@ -1181,6 +1663,10 @@ pub fn stop() {
     *STARTED.lock().unwrap() = false;
 }
 
+/// Stops the progress display and clears it from the screen.
+///
+/// Unlike [`stop`], this immediately clears all progress output without rendering
+/// a final frame. Use this when you want to completely remove the progress display.
 pub fn stop_clear() {
     // Stop immediately and clear any progress from the screen
     STOPPING.store(true, Ordering::Relaxed);
@@ -1671,18 +2157,45 @@ fn add_tera_template(tera: &mut Tera, name: &str, body: &str) -> Result<()> {
     Ok(())
 }
 
+/// Output mode for progress display.
+///
+/// Controls how progress jobs are rendered to the terminal.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ProgressOutput {
+    /// Rich terminal UI with animated spinners and in-place updates.
+    ///
+    /// This is the default mode. Progress is rendered with ANSI escape codes for
+    /// colors and cursor movement, allowing smooth animation and in-place updates.
     UI,
+    /// Simple text output for non-interactive environments.
+    ///
+    /// In this mode, each update is printed as a new line without ANSI escape codes
+    /// or cursor manipulation. Use this for CI systems, log files, or when stdout/stderr
+    /// is not a terminal.
     Text,
 }
 
 static OUTPUT: Mutex<ProgressOutput> = Mutex::new(ProgressOutput::UI);
 
+/// Sets the output mode for progress display.
+///
+/// This should be called before starting any progress jobs.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use clx::progress::{set_output, ProgressOutput};
+///
+/// // Use text mode for CI environments
+/// if std::env::var("CI").is_ok() {
+///     set_output(ProgressOutput::Text);
+/// }
+/// ```
 pub fn set_output(output: ProgressOutput) {
     *OUTPUT.lock().unwrap() = output;
 }
 
+/// Returns the current output mode.
 #[must_use]
 pub fn output() -> ProgressOutput {
     *OUTPUT.lock().unwrap()
