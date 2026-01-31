@@ -1110,7 +1110,10 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
             let estimated_total = job_elapsed_secs / progress_ratio;
             let remaining = estimated_total - job_elapsed_secs;
             if remaining > 0.0 {
-                (Some(format_duration(Duration::from_secs_f64(remaining))), false)
+                (
+                    Some(format_duration(Duration::from_secs_f64(remaining))),
+                    false,
+                )
             } else {
                 (Some("0s".to_string()), true) // 0s means complete
             }
