@@ -2109,12 +2109,30 @@ fn encode_progress_bar_chars(chars: &progress_bar::ProgressBarChars) -> String {
 }
 
 fn decode_progress_bar_chars(encoded: &str) -> progress_bar::ProgressBarChars {
+    // Single-pass decode to avoid issues with sequences like %252C
+    // (encoded %) being incorrectly decoded when using chained replace()
     fn decode_part(s: &str) -> String {
-        s.replace("%2C", ",")
-            .replace("%20", " ")
-            .replace("%3C", "<")
-            .replace("%3E", ">")
-            .replace("%25", "%")
+        let mut result = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                let hex: String = chars.by_ref().take(2).collect();
+                match hex.as_str() {
+                    "2C" => result.push(','),
+                    "20" => result.push(' '),
+                    "3C" => result.push('<'),
+                    "3E" => result.push('>'),
+                    "25" => result.push('%'),
+                    _ => {
+                        result.push('%');
+                        result.push_str(&hex);
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
     }
     let parts: Vec<&str> = encoded.splitn(5, ',').collect();
     if parts.len() >= 5 {
@@ -2258,7 +2276,12 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
         if let Some((cur, total)) = progress {
             if total > 0 {
                 let pct = (cur as f64 / total as f64) * 100.0;
-                let decimals = props.get("decimals").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+                // Clamp decimals to 0..=20 to prevent negative wraparound and excessive allocation
+                let decimals = props
+                    .get("decimals")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    .clamp(0, 20) as usize;
                 Ok(format!("{:.prec$}%", pct, prec = decimals).into())
             } else {
                 Ok("0%".to_string().into())
@@ -2283,7 +2306,12 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
                 .or_else(|| progress.map(|(cur, _)| cur));
 
             if let Some(n) = value {
-                let decimals = props.get("decimals").and_then(|v| v.as_i64()).unwrap_or(1) as usize;
+                // Clamp decimals to 0..=20 to prevent negative wraparound and excessive allocation
+                let decimals = props
+                    .get("decimals")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1)
+                    .clamp(0, 20) as usize;
                 Ok(format_count(n, decimals).into())
             } else {
                 Ok("".to_string().into())
