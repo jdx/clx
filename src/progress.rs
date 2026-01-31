@@ -710,6 +710,24 @@ impl RenderContext {
     }
 }
 
+/// Shared render context for refresh cycles.
+///
+/// Reused across refreshes, with `now` and `width` updated each cycle.
+static RENDER_CTX: OnceLock<Mutex<RenderContext>> = OnceLock::new();
+
+/// Prepares the render context for a refresh cycle.
+///
+/// Updates the timestamp and terminal width, then returns a cloned context.
+/// This ensures the display adapts to terminal resizes.
+fn prepare_render_context() -> RenderContext {
+    let ctx = RENDER_CTX.get_or_init(|| Mutex::new(RenderContext::default()));
+    let mut ctx_guard = ctx.lock().unwrap();
+    ctx_guard.now = Instant::now();
+    // Update terminal width on each refresh to handle resize
+    ctx_guard.width = term().size().1 as usize;
+    ctx_guard.clone()
+}
+
 /// Builder for creating progress jobs.
 ///
 /// Use this builder to configure a progress job before starting it. The builder
@@ -1699,15 +1717,7 @@ fn refresh() -> Result<bool> {
     if is_paused() {
         return Ok(true);
     }
-    static RENDER_CTX: OnceLock<Mutex<RenderContext>> = OnceLock::new();
-    let ctx = RENDER_CTX.get_or_init(|| Mutex::new(RenderContext::default()));
-    {
-        let mut ctx_guard = ctx.lock().unwrap();
-        ctx_guard.now = Instant::now();
-        // Update terminal width on each refresh to handle resize
-        ctx_guard.width = term().size().1 as usize;
-    }
-    let ctx = ctx.lock().unwrap().clone();
+    let ctx = prepare_render_context();
     let mut tera = TERA.lock().unwrap();
     if tera.is_none() {
         *tera = Some(Tera::default());
@@ -1802,15 +1812,7 @@ fn refresh_once() -> Result<()> {
         *tera = Some(Tera::default());
     }
     let tera = tera.as_mut().unwrap();
-    static RENDER_CTX: OnceLock<Mutex<RenderContext>> = OnceLock::new();
-    let ctx = RENDER_CTX.get_or_init(|| Mutex::new(RenderContext::default()));
-    {
-        let mut ctx_guard = ctx.lock().unwrap();
-        ctx_guard.now = Instant::now();
-        // Update terminal width on each refresh to handle resize
-        ctx_guard.width = term().size().1 as usize;
-    }
-    let ctx = ctx.lock().unwrap().clone();
+    let ctx = prepare_render_context();
     let jobs = JOBS.lock().unwrap().clone();
 
     // Update OSC progress based on current job progress
