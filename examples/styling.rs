@@ -32,10 +32,7 @@ fn main() {
 
     // Combining styles
     println!("--- Combined Styles ---");
-    eprintln!(
-        "  {}  - bold + cyan",
-        style::ecyan("bold cyan").bold()
-    );
+    eprintln!("  {}  - bold + cyan", style::ecyan("bold cyan").bold());
     eprintln!(
         "  {}  - dim + underline",
         style::edim("dim underlined").underlined()
@@ -67,8 +64,6 @@ fn main() {
     );
     println!(
         "  {}",
-        style::nstyle("custom: blink + magenta")
-            .blink()
-            .magenta()
+        style::nstyle("custom: blink + magenta").blink().magenta()
     );
 }

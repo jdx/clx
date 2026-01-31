@@ -1565,7 +1565,8 @@ mod tests {
         assert!(result.contains("     ")); // multiple spaces
 
         // Test flex_fill with long content (should truncate)
-        let s = "pre<clx:flex_fill>this is very long content that needs truncation<clx:flex_fill>end";
+        let s =
+            "pre<clx:flex_fill>this is very long content that needs truncation<clx:flex_fill>end";
         let result = flex(s, 20);
         let width = console::measure_text_width(&result);
         assert!(width <= 20);
@@ -1675,9 +1676,7 @@ mod tests {
 
     #[test]
     fn test_progress_job_progress_updates() {
-        let job = ProgressJobBuilder::new()
-            .progress_total(100)
-            .build();
+        let job = ProgressJobBuilder::new().progress_total(100).build();
 
         assert_eq!(*job.progress_total.lock().unwrap(), Some(100));
         assert!(job.progress_current.lock().unwrap().is_none());
@@ -1692,9 +1691,7 @@ mod tests {
 
     #[test]
     fn test_progress_job_progress_total_update() {
-        let job = ProgressJobBuilder::new()
-            .progress_current(80)
-            .build();
+        let job = ProgressJobBuilder::new().progress_current(80).build();
 
         // Setting total less than current should be adjusted
         job.progress_total(50);
@@ -1750,7 +1747,10 @@ mod tests {
 
     #[test]
     fn test_progress_job_done_behavior() {
-        assert_eq!(ProgressJobDoneBehavior::default(), ProgressJobDoneBehavior::Keep);
+        assert_eq!(
+            ProgressJobDoneBehavior::default(),
+            ProgressJobDoneBehavior::Keep
+        );
     }
 
     #[test]
