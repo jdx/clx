@@ -211,6 +211,16 @@
 //! - Each `update()` call writes directly to stderr
 //! - Useful for CI/CD, piped output, or non-terminal environments
 //!
+//! ## Terminal Resize Handling
+//!
+//! On Unix systems, the progress display automatically adapts to terminal resizes:
+//! - A SIGWINCH signal handler is registered when the background thread starts
+//! - When the terminal is resized, the display is immediately re-rendered
+//! - The `flex` and `flex_fill` filters adapt content to the new width
+//! - Progress bars with `flex=true` automatically resize
+//!
+//! This is handled transparently - no user code is required to enable resize support.
+//!
 //! ## Example: Multi-threaded Usage
 //!
 //! ```rust,no_run
@@ -607,6 +617,52 @@ static STARTED: Mutex<bool> = Mutex::new(false);
 /// Set by [`pause`], cleared by [`resume`].
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// Flag indicating that a terminal resize (SIGWINCH) was received.
+///
+/// On Unix systems, this is set by the SIGWINCH signal handler.
+/// The background thread checks this flag and triggers an immediate
+/// refresh when set, ensuring the display adapts to the new terminal size.
+#[cfg(unix)]
+static RESIZE_SIGNALED: AtomicBool = AtomicBool::new(false);
+
+/// Signal handler for SIGWINCH (terminal resize).
+///
+/// This is an async-signal-safe handler that only sets an atomic flag.
+/// The actual refresh is performed by the background thread.
+#[cfg(unix)]
+extern "C" fn handle_sigwinch(_: nix::libc::c_int) {
+    RESIZE_SIGNALED.store(true, Ordering::Relaxed);
+}
+
+/// Registers the SIGWINCH signal handler for terminal resize detection.
+///
+/// This is called when the background refresh thread starts. The handler
+/// sets `RESIZE_SIGNALED` which triggers an immediate refresh.
+#[cfg(unix)]
+fn register_resize_handler() {
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
+    let handler = SigHandler::Handler(handle_sigwinch);
+    let action = SigAction::new(handler, SaFlags::SA_RESTART, SigSet::empty());
+    // Ignore errors - resize handling is best-effort
+    unsafe {
+        let _ = sigaction(Signal::SIGWINCH, &action);
+    }
+}
+
+/// Checks and clears the resize signal flag.
+///
+/// Returns `true` if a resize was signaled since the last check.
+#[cfg(unix)]
+fn check_resize_signaled() -> bool {
+    RESIZE_SIGNALED.swap(false, Ordering::Relaxed)
+}
+
+/// Stub for non-Unix platforms where SIGWINCH doesn't exist.
+#[cfg(not(unix))]
+fn check_resize_signaled() -> bool {
+    false
+}
+
 /// Collection of all top-level progress jobs.
 ///
 /// Jobs are added via [`ProgressJobBuilder::start`] and removed when they
@@ -652,6 +708,24 @@ impl RenderContext {
     pub fn elapsed(&self) -> Duration {
         self.now - self.start
     }
+}
+
+/// Shared render context for refresh cycles.
+///
+/// Reused across refreshes, with `now` and `width` updated each cycle.
+static RENDER_CTX: OnceLock<Mutex<RenderContext>> = OnceLock::new();
+
+/// Prepares the render context for a refresh cycle.
+///
+/// Updates the timestamp and terminal width, then returns a cloned context.
+/// This ensures the display adapts to terminal resizes.
+fn prepare_render_context() -> RenderContext {
+    let ctx = RENDER_CTX.get_or_init(|| Mutex::new(RenderContext::default()));
+    let mut ctx_guard = ctx.lock().unwrap();
+    ctx_guard.now = Instant::now();
+    // Update terminal width on each refresh to handle resize
+    ctx_guard.width = term().size().1 as usize;
+    ctx_guard.clone()
 }
 
 /// Builder for creating progress jobs.
@@ -1578,6 +1652,11 @@ fn start() {
     // Mark as started BEFORE spawning to avoid a race that can start two loops
     *started = true;
     drop(started);
+
+    // Register SIGWINCH handler for terminal resize detection (Unix only)
+    #[cfg(unix)]
+    register_resize_handler();
+
     thread::spawn(move || {
         let mut refresh_after = Instant::now();
         loop {
@@ -1594,6 +1673,13 @@ fn start() {
                     eprintln!("clx: {err:?}");
                     *LINES.lock().unwrap() = 0;
                 }
+            }
+            // Check for terminal resize and trigger immediate refresh if needed
+            if check_resize_signaled() {
+                // Clear the output cache to force a full re-render with new dimensions
+                LAST_OUTPUT.lock().unwrap().clear();
+                // Skip the normal wait and refresh immediately
+                continue;
             }
             notify_wait(interval());
         }
@@ -1631,10 +1717,7 @@ fn refresh() -> Result<bool> {
     if is_paused() {
         return Ok(true);
     }
-    static RENDER_CTX: OnceLock<Mutex<RenderContext>> = OnceLock::new();
-    let ctx = RENDER_CTX.get_or_init(|| Mutex::new(RenderContext::default()));
-    ctx.lock().unwrap().now = Instant::now();
-    let ctx = ctx.lock().unwrap().clone();
+    let ctx = prepare_render_context();
     let mut tera = TERA.lock().unwrap();
     if tera.is_none() {
         *tera = Some(Tera::default());
@@ -1729,10 +1812,7 @@ fn refresh_once() -> Result<()> {
         *tera = Some(Tera::default());
     }
     let tera = tera.as_mut().unwrap();
-    static RENDER_CTX: OnceLock<Mutex<RenderContext>> = OnceLock::new();
-    let ctx = RENDER_CTX.get_or_init(|| Mutex::new(RenderContext::default()));
-    ctx.lock().unwrap().now = Instant::now();
-    let ctx = ctx.lock().unwrap().clone();
+    let ctx = prepare_render_context();
     let jobs = JOBS.lock().unwrap().clone();
 
     // Update OSC progress based on current job progress
@@ -3352,5 +3432,14 @@ mod tests {
         assert_eq!(decoded.empty, chars.empty);
         assert_eq!(decoded.left, chars.left);
         assert_eq!(decoded.right, chars.right);
+    }
+
+    #[test]
+    fn test_resize_signal_check() {
+        // The check_resize_signaled function should be callable and return a bool.
+        // On first call (without an actual SIGWINCH), it should return false.
+        // We can't easily test the signal handler itself without sending signals.
+        let result = check_resize_signaled();
+        assert!(!result); // Should be false since no signal was sent
     }
 }
