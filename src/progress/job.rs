@@ -341,7 +341,9 @@ impl ProgressJob {
 
     /// Increments the current progress value by the specified amount.
     pub fn increment(&self, n: usize) {
-        let current = self.progress_current.lock().unwrap().unwrap_or(0);
+        // Hold lock throughout read-modify-write to prevent race conditions
+        let mut current_guard = self.progress_current.lock().unwrap();
+        let current = current_guard.unwrap_or(0);
         let mut new_current = current.saturating_add(n);
 
         if let Some(total) = *self.progress_total.lock().unwrap() {
@@ -350,7 +352,9 @@ impl ProgressJob {
 
         self.update_smoothed_rate(new_current);
 
-        *self.progress_current.lock().unwrap() = Some(new_current);
+        *current_guard = Some(new_current);
+        drop(current_guard);
+
         self.prop("cur", &new_current);
     }
 
