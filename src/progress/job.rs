@@ -341,47 +341,16 @@ impl ProgressJob {
 
     /// Increments the current progress value by the specified amount.
     pub fn increment(&self, n: usize) {
-        let mut current_guard = self.progress_current.lock().unwrap();
-        let current = current_guard.unwrap_or(0);
+        let current = self.progress_current.lock().unwrap().unwrap_or(0);
         let mut new_current = current.saturating_add(n);
 
         if let Some(total) = *self.progress_total.lock().unwrap() {
             new_current = new_current.min(total);
         }
 
-        // Update smoothed rate - need to unlock current_guard first
-        let update_rate = {
-            let now = Instant::now();
-            let mut last_update = self.last_progress_update.lock().unwrap();
-            let rate = if let Some((last_time, last_value)) = *last_update {
-                let elapsed = now.duration_since(last_time).as_secs_f64();
-                if elapsed > 0.001 && new_current > last_value {
-                    let items_processed = (new_current - last_value) as f64;
-                    let instantaneous_rate = items_processed / elapsed;
-                    Some(instantaneous_rate)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            // Always update last_progress_update to track the current position
-            *last_update = Some((now, new_current));
-            rate
-        };
+        self.update_smoothed_rate(new_current);
 
-        if let Some(instantaneous_rate) = update_rate {
-            const ALPHA: f64 = 0.3;
-            let mut smoothed = self.smoothed_rate.lock().unwrap();
-            *smoothed = Some(match *smoothed {
-                Some(old_rate) => ALPHA * instantaneous_rate + (1.0 - ALPHA) * old_rate,
-                None => instantaneous_rate,
-            });
-        }
-
-        *current_guard = Some(new_current);
-        drop(current_guard);
-
+        *self.progress_current.lock().unwrap() = Some(new_current);
         self.prop("cur", &new_current);
     }
 
