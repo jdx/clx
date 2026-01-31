@@ -1092,6 +1092,23 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
+fn format_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+
+    let bytes = bytes as f64;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes / KB)
+    } else {
+        format!("{} B", bytes as usize)
+    }
+}
+
 fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     let elapsed = ctx.elapsed().as_millis() as usize;
     let job_elapsed = job.start.elapsed();
@@ -1159,6 +1176,25 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     };
     tera.register_function("rate", move |_: &HashMap<String, tera::Value>| {
         Ok(rate_str.clone().into())
+    });
+
+    // bytes() - show progress as human-readable bytes (e.g., "5.2 MB / 10.4 MB")
+    // Options:
+    //   hide_complete: bool - if true, return empty string when progress is 100%
+    let bytes_is_complete = progress.map(|(cur, total)| cur >= total).unwrap_or(false);
+    tera.register_function("bytes", move |props: &HashMap<String, tera::Value>| {
+        let hide_complete = props
+            .get("hide_complete")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if hide_complete && bytes_is_complete {
+            return Ok("".to_string().into());
+        }
+        if let Some((cur, total)) = progress {
+            Ok(format!("{} / {}", format_bytes(cur), format_bytes(total)).into())
+        } else {
+            Ok("".to_string().into())
+        }
     });
 
     tera.register_function(
