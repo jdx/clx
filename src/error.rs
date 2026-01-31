@@ -92,6 +92,7 @@ mod tests {
         assert!(matches!(error, Error::Tera(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_script_failed_with_exit_code() {
         // Create a ScriptFailed error with an exit code
@@ -140,6 +141,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_render_exit_status_with_code() {
         // Test the helper function with an exit code
