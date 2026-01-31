@@ -164,7 +164,7 @@ const DEFAULT_SPINNER: &str = "mini_dot";
 #[rustfmt::skip]
 static SPINNERS: LazyLock<HashMap<String, Spinner>> = LazyLock::new(|| {
     vec![
-        // from https://github.com/charmbracelet/bubbles/blob/ea344ab907bddf5e8f71cd73b9583b070e8f1b2f/spinner/spinner.go
+        // Classic - from https://github.com/charmbracelet/bubbles/blob/ea344ab907bddf5e8f71cd73b9583b070e8f1b2f/spinner/spinner.go
         spinner!("line", &["|", "/", "-", "\\"], 200),
         spinner!("dot", &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"], 200),
         spinner!("mini_dot", &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 200),
@@ -177,6 +177,27 @@ static SPINNERS: LazyLock<HashMap<String, Spinner>> = LazyLock::new(|| {
         spinner!("meter", &["▱▱▱", "▰▱▱", "▰▰▱", "▰▰▰", "▰▰▱", "▰▱▱", "▱▱▱"], 400),
         spinner!("hamburger", &["☱", "☲", "☴", "☲"], 200),
         spinner!("ellipsis", &["   ", ".  ", ".. ", "..."], 200),
+        // Classic/Minimal
+        spinner!("arrow", &["←", "↖", "↑", "↗", "→", "↘", "↓", "↙"], 200),
+        spinner!("triangle", &["◢", "◣", "◤", "◥"], 200),
+        spinner!("square", &["◰", "◳", "◲", "◱"], 200),
+        spinner!("circle", &["◴", "◷", "◶", "◵"], 200),
+        // Box Drawing
+        spinner!("bounce", &["⠁", "⠂", "⠄", "⠂"], 200),
+        spinner!("arc", &["◜", "◠", "◝", "◞", "◡", "◟"], 200),
+        spinner!("box_bounce", &["▖", "▘", "▝", "▗"], 200),
+        // Aesthetic
+        spinner!("star", &["✶", "✸", "✹", "✺", "✹", "✷"], 200),
+        spinner!("hearts", &["💛", "💙", "💜", "💚", "❤️"], 400),
+        spinner!("clock", &["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"], 200),
+        spinner!("weather", &["🌤", "⛅", "🌥", "☁️", "🌧", "⛈", "🌩", "🌨"], 400),
+        // Growing/Progress-like
+        spinner!("grow_horizontal", &["▏", "▎", "▍", "▌", "▋", "▊", "▉", "█", "▉", "▊", "▋", "▌", "▍", "▎"], 200),
+        spinner!("grow_vertical", &["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▂"], 200),
+        // Playful
+        spinner!("runner", &["🚶", "🏃"], 400),
+        spinner!("oranges", &["🍊", "🍋", "🍇", "🍎"], 400),
+        spinner!("smiley", &["😀", "😬", "😁", "😂", "🤣", "😂", "😁", "😬"], 400),
     ]
     .into_iter()
     .collect()

@@ -78,7 +78,12 @@ let job = ProgressJobBuilder::new()
 ```
 
 Available template functions:
-- `spinner(name='...')` - Animated spinner (line, dot, mini_dot, jump, pulse, points, globe, moon, monkey, meter, hamburger, ellipsis)
+- `spinner(name='...')` - Animated spinner. Available spinners:
+  - Classic: `line`, `dot`, `mini_dot`, `jump`, `pulse`, `points`, `hamburger`, `ellipsis`
+  - Minimal: `arrow`, `triangle`, `square`, `circle`, `bounce`, `arc`, `box_bounce`
+  - Aesthetic: `star`, `hearts`, `clock`, `weather`
+  - Growing: `grow_horizontal`, `grow_vertical`, `meter`
+  - Emoji: `globe`, `moon`, `monkey`, `runner`, `oranges`, `smiley`
 - `progress_bar(flex=true)` - Progress bar that fills available width
 - `progress_bar(width=N)` - Fixed-width progress bar
 
