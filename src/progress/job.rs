@@ -417,12 +417,10 @@ impl ProgressJob {
     ///
     /// Call this method between operations after calling [`start_operations`](Self::start_operations).
     pub fn next_operation(&self) {
-        // Advance operation index
-        let mut index = self.operation_index.lock().unwrap();
-        *index += 1;
-        drop(index);
-
-        // Reset progress for the new operation (both internal state and template props)
+        // Reset progress for the new operation BEFORE advancing the index.
+        // This prevents a race condition where concurrent overall_progress() calls
+        // could see the new operation index with stale progress values from the
+        // previous operation, causing brief incorrect progress spikes.
         *self.progress_current.lock().unwrap() = None;
         *self.progress_total.lock().unwrap() = None;
         {
@@ -434,6 +432,9 @@ impl ProgressJob {
         // Reset rate tracking for accurate ETA on new operation
         *self.last_progress_update.lock().unwrap() = None;
         *self.smoothed_rate.lock().unwrap() = None;
+
+        // Advance operation index after clearing progress values
+        *self.operation_index.lock().unwrap() += 1;
 
         self.update();
     }
