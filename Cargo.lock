@@ -167,6 +167,7 @@ name = "clx"
 version = "1.1.0"
 dependencies = [
  "console",
+ "log",
  "nix",
  "serde",
  "serde_json",

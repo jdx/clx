@@ -10,8 +10,13 @@ readme = "README.md"
 include = ["examples/**/*.rs", "src/**/*.rs"]
 rust-version = "1.85"
 
+[features]
+default = []
+log = ["dep:log"]
+
 [dependencies]
 console = "0.16"
+log = { version = "0.4", optional = true, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 strum = { version = "0.27", features = ["derive"] }
