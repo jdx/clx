@@ -166,6 +166,8 @@ impl ProgressJobBuilder {
             start: Instant::now(),
             last_progress_update: Mutex::new(None),
             smoothed_rate: Mutex::new(None),
+            operations_total: Mutex::new(None),
+            operation_index: Mutex::new(0),
         }
     }
 
@@ -196,6 +198,10 @@ pub struct ProgressJob {
     pub(crate) last_progress_update: Mutex<Option<(Instant, usize)>>,
     /// Exponentially smoothed rate (items per second)
     pub(crate) smoothed_rate: Mutex<Option<f64>>,
+    /// Multi-operation tracking: total number of operations
+    pub(crate) operations_total: Mutex<Option<usize>>,
+    /// Multi-operation tracking: current operation index (0-indexed)
+    pub(crate) operation_index: Mutex<usize>,
 }
 
 impl ProgressJob {
@@ -358,25 +364,151 @@ impl ProgressJob {
         self.prop("cur", &new_current);
     }
 
+    /// Declares the total number of operations for multi-operation progress tracking.
+    ///
+    /// When tracking multi-stage tasks (e.g., download → checksum → extract),
+    /// call this method to declare how many operations there will be. Each operation
+    /// will be allocated an equal share of the overall progress (for OSC indicators),
+    /// while `bytes()` and other template functions will show the actual values
+    /// for the current operation.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::ProgressJobBuilder;
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .body("{{ message }} {{ bytes() }} {{ progress_bar(width=20) }}")
+    ///     .start();
+    ///
+    /// // Declare 3 operations: download, checksum, extract
+    /// job.start_operations(3);
+    ///
+    /// // Operation 1: Download (50MB file)
+    /// job.message("Downloading...");
+    /// job.progress_total(50_000_000);
+    /// // ... update progress_current as download progresses ...
+    /// // bytes() shows "25.0 MB / 50.0 MB", OSC shows ~16% (halfway through op 1 of 3)
+    ///
+    /// // Operation 2: Checksum
+    /// job.next_operation();
+    /// job.message("Verifying checksum...");
+    /// job.progress_total(50_000_000);
+    /// // ... update progress_current ...
+    /// // bytes() shows actual checksum progress, OSC shows 33-66%
+    ///
+    /// // Operation 3: Extract
+    /// job.next_operation();
+    /// job.message("Extracting...");
+    /// job.progress_total(200); // 200 files
+    /// // ... update progress_current ...
+    /// // bytes() shows "150 / 200", OSC shows 66-100%
+    /// ```
+    pub fn start_operations(&self, count: usize) {
+        let count = count.max(1);
+        *self.operations_total.lock().unwrap() = Some(count);
+        *self.operation_index.lock().unwrap() = 0;
+    }
+
+    /// Advances to the next operation in a multi-operation sequence.
+    ///
+    /// This resets the current progress values and advances the operation index.
+    /// The overall progress (for OSC) will reflect the completed operations.
+    ///
+    /// Call this method between operations after calling [`start_operations`](Self::start_operations).
+    pub fn next_operation(&self) {
+        // Advance operation index
+        let mut index = self.operation_index.lock().unwrap();
+        *index += 1;
+        drop(index);
+
+        // Reset progress for the new operation
+        *self.progress_current.lock().unwrap() = None;
+        *self.progress_total.lock().unwrap() = None;
+
+        // Reset rate tracking for accurate ETA on new operation
+        *self.last_progress_update.lock().unwrap() = None;
+        *self.smoothed_rate.lock().unwrap() = None;
+
+        self.update();
+    }
+
+    /// Returns the overall progress accounting for multi-operation tracking.
+    ///
+    /// If [`start_operations`](Self::start_operations) was called, this returns progress
+    /// mapped across all operations. Otherwise, returns the raw progress values.
+    ///
+    /// This is used internally for OSC progress reporting to ensure smooth
+    /// 0-100% progress across all operations.
+    ///
+    /// # Returns
+    ///
+    /// - `Some((current, total))` - The overall progress as a tuple
+    /// - `None` - No progress tracking is active
+    pub fn overall_progress(&self) -> Option<(usize, usize)> {
+        let ops_total = *self.operations_total.lock().unwrap();
+        let current = *self.progress_current.lock().unwrap();
+        let total = *self.progress_total.lock().unwrap();
+
+        match (ops_total, current, total) {
+            // Multi-operation mode: map progress across operations
+            (Some(ops), Some(cur), Some(tot)) => {
+                let op_idx = *self.operation_index.lock().unwrap();
+                // Use 1,000,000 as the scale for precision
+                let scale = 1_000_000usize;
+                let per_op = scale / ops;
+
+                // Progress from completed operations + progress within current operation
+                let completed_progress = op_idx * per_op;
+                let current_op_progress = if tot > 0 {
+                    (cur as f64 / tot as f64 * per_op as f64) as usize
+                } else {
+                    0
+                };
+
+                Some((completed_progress + current_op_progress, scale))
+            }
+            // Multi-operation mode but no progress yet: show completed operations
+            (Some(ops), None, None) => {
+                let op_idx = *self.operation_index.lock().unwrap();
+                let scale = 1_000_000usize;
+                let per_op = scale / ops;
+                Some((op_idx * per_op, scale))
+            }
+            // Single operation mode: return raw values
+            (None, Some(cur), Some(tot)) => Some((cur, tot)),
+            // No progress tracking
+            _ => None,
+        }
+    }
+
     /// Helper to update the smoothed rate based on progress change.
     fn update_smoothed_rate(&self, current: usize) {
         let now = Instant::now();
         let mut last_update = self.last_progress_update.lock().unwrap();
         if let Some((last_time, last_value)) = *last_update {
             let elapsed = now.duration_since(last_time).as_secs_f64();
-            if elapsed > 0.001 && current > last_value {
+            // Debounce: only update rate if at least 100ms has passed
+            // This prevents jumpy ETA from rapid small updates
+            if elapsed > 0.1 && current > last_value {
                 let items_processed = (current - last_value) as f64;
                 let instantaneous_rate = items_processed / elapsed;
 
-                const ALPHA: f64 = 0.3;
+                // Lower alpha = smoother ETA (less reactive to instantaneous changes)
+                // 0.1 means 10% weight on new rate, 90% on historical rate
+                const ALPHA: f64 = 0.1;
                 let mut smoothed = self.smoothed_rate.lock().unwrap();
                 *smoothed = Some(match *smoothed {
                     Some(old_rate) => ALPHA * instantaneous_rate + (1.0 - ALPHA) * old_rate,
                     None => instantaneous_rate,
                 });
+                // Only update the timestamp when we actually recalculate
+                *last_update = Some((now, current));
             }
+        } else {
+            // First update - just record the timestamp
+            *last_update = Some((now, current));
         }
-        *last_update = Some((now, current));
     }
 
     /// Sets the message property.
@@ -569,5 +701,124 @@ mod tests {
         assert!(debug_str.contains("ProgressJob"));
         assert!(debug_str.contains("id:"));
         assert!(debug_str.contains("Running"));
+    }
+
+    #[test]
+    fn test_start_operations() {
+        let job = ProgressJobBuilder::new().build();
+
+        // Initially no operations
+        assert!(job.operations_total.lock().unwrap().is_none());
+        assert_eq!(*job.operation_index.lock().unwrap(), 0);
+
+        // Start with 3 operations
+        job.start_operations(3);
+        assert_eq!(*job.operations_total.lock().unwrap(), Some(3));
+        assert_eq!(*job.operation_index.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_start_operations_minimum_one() {
+        let job = ProgressJobBuilder::new().build();
+
+        // Passing 0 should be clamped to 1
+        job.start_operations(0);
+        assert_eq!(*job.operations_total.lock().unwrap(), Some(1));
+    }
+
+    #[test]
+    fn test_next_operation() {
+        let job = ProgressJobBuilder::new().build();
+
+        job.start_operations(3);
+        job.progress_total(100);
+        job.progress_current(50);
+
+        // Advance to next operation
+        job.next_operation();
+
+        assert_eq!(*job.operation_index.lock().unwrap(), 1);
+        // Progress should be reset
+        assert!(job.progress_current.lock().unwrap().is_none());
+        assert!(job.progress_total.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_overall_progress_single_operation() {
+        let job = ProgressJobBuilder::new().build();
+
+        // Without start_operations, should return raw values
+        job.progress_total(100);
+        job.progress_current(25);
+
+        let progress = job.overall_progress();
+        assert_eq!(progress, Some((25, 100)));
+    }
+
+    #[test]
+    fn test_overall_progress_multi_operation_first_op() {
+        let job = ProgressJobBuilder::new().build();
+
+        job.start_operations(4); // 4 operations = 250,000 each
+        job.progress_total(1000);
+        job.progress_current(500); // 50% of first operation
+
+        let progress = job.overall_progress();
+        // Should be ~125,000 out of 1,000,000 (12.5% overall)
+        assert!(progress.is_some());
+        let (cur, total) = progress.unwrap();
+        assert_eq!(total, 1_000_000);
+        assert_eq!(cur, 125_000); // 50% of 250,000
+    }
+
+    #[test]
+    fn test_overall_progress_multi_operation_second_op() {
+        let job = ProgressJobBuilder::new().build();
+
+        job.start_operations(4); // 4 operations = 250,000 each
+        job.next_operation(); // Move to operation 1 (0-indexed)
+        job.progress_total(200);
+        job.progress_current(100); // 50% of second operation
+
+        let progress = job.overall_progress();
+        assert!(progress.is_some());
+        let (cur, total) = progress.unwrap();
+        assert_eq!(total, 1_000_000);
+        // First op complete (250,000) + 50% of second op (125,000) = 375,000
+        assert_eq!(cur, 375_000);
+    }
+
+    #[test]
+    fn test_overall_progress_no_progress_yet() {
+        let job = ProgressJobBuilder::new().build();
+
+        job.start_operations(4);
+        // No progress set yet
+
+        let progress = job.overall_progress();
+        // Should show 0 progress (at start of first operation)
+        assert_eq!(progress, Some((0, 1_000_000)));
+    }
+
+    #[test]
+    fn test_overall_progress_between_operations() {
+        let job = ProgressJobBuilder::new().build();
+
+        job.start_operations(4);
+        job.next_operation(); // Move to second operation
+        // No progress set for current operation
+
+        let progress = job.overall_progress();
+        // Should show completed first operation
+        assert_eq!(progress, Some((250_000, 1_000_000)));
+    }
+
+    #[test]
+    fn test_overall_progress_none_without_tracking() {
+        let job = ProgressJobBuilder::new().build();
+
+        // No progress tracking at all
+        let progress = job.overall_progress();
+        assert!(progress.is_none());
     }
 }

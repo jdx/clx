@@ -152,17 +152,25 @@ fn calculate_rate_string(
 /// Registers bytes(), percentage(), and count_format() functions.
 fn register_progress_functions(tera: &mut Tera, progress: Option<(usize, usize)>) {
     // bytes() - show progress as human-readable bytes
+    // Options:
+    //   hide_complete: bool - if true, return empty string when progress is 100%
+    //   total: bool - if false, show only current bytes without "/ total" (default: true)
     let bytes_is_complete = progress.map(|(cur, total)| cur >= total).unwrap_or(false);
     tera.register_function("bytes", move |props: &HashMap<String, tera::Value>| {
         let hide_complete = props
             .get("hide_complete")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let show_total = props.get("total").and_then(|v| v.as_bool()).unwrap_or(true);
         if hide_complete && bytes_is_complete {
             return Ok("".to_string().into());
         }
         if let Some((cur, total)) = progress {
-            Ok(format!("{} / {}", format_bytes(cur), format_bytes(total)).into())
+            if show_total {
+                Ok(format!("{} / {}", format_bytes(cur), format_bytes(total)).into())
+            } else {
+                Ok(format_bytes(cur).into())
+            }
         } else {
             Ok("".to_string().into())
         }
