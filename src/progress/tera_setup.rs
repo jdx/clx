@@ -52,7 +52,8 @@ fn register_time_functions(
 
     // eta() - estimated time remaining (uses operation-specific elapsed time for fallback)
     let smoothed_rate = *job.smoothed_rate.lock().unwrap();
-    let (eta_value, eta_is_complete) = calculate_eta(progress, smoothed_rate, operation_elapsed_secs);
+    let (eta_value, eta_is_complete) =
+        calculate_eta(progress, smoothed_rate, operation_elapsed_secs);
     tera.register_function("eta", move |props: &HashMap<String, tera::Value>| {
         let hide_complete = props
             .get("hide_complete")
