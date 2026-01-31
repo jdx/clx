@@ -1,38 +1,98 @@
-/// OSC (Operating System Command) escape sequences for terminal integration
-///
-/// This module provides support for OSC escape sequences that allow terminal
-/// integration features like progress bars in Ghostty, VS Code, Windows Terminal,
-/// and VTE-based terminals.
+//! OSC (Operating System Command) escape sequences for terminal integration.
+//!
+//! This module provides support for OSC 9;4 progress sequences that display a progress
+//! indicator in the terminal's title bar or tab. This is supported by several modern
+//! terminals:
+//!
+//! - **Ghostty** - Full support
+//! - **VS Code integrated terminal** - Full support
+//! - **Windows Terminal** - Full support
+//! - **iTerm2** - Full support
+//! - **VTE-based terminals** (GNOME Terminal, etc.) - Full support
+//!
+//! The progress indicator is automatically updated based on job progress and will
+//! show different states (normal, error, warning) based on job status.
+//!
+//! # Configuration
+//!
+//! OSC progress is enabled by default. To disable it:
+//!
+//! ```rust,no_run
+//! use clx::osc;
+//!
+//! // Must be called before any progress jobs start
+//! osc::configure(false);
+//! ```
+//!
+//! # How It Works
+//!
+//! When progress jobs are running, clx automatically sends OSC 9;4 sequences to
+//! update the terminal's progress indicator. The progress percentage is calculated
+//! from job progress values or estimated from job status.
+
 use std::io::Write;
 use std::sync::OnceLock;
 
 /// Global OSC progress enable/disable flag
 static OSC_ENABLED: OnceLock<bool> = OnceLock::new();
 
-/// Configure OSC progress functionality
+/// Configures whether OSC progress sequences are enabled.
+///
+/// This must be called before any progress jobs are started. Once set, the value
+/// cannot be changed.
+///
+/// # Panics
+///
+/// Panics if called after OSC progress has already been initialized (either by
+/// a previous call to `configure` or by starting a progress job).
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use clx::osc;
+///
+/// // Disable OSC progress for environments that don't support it
+/// osc::configure(false);
+/// ```
 pub fn configure(enabled: bool) {
     OSC_ENABLED
         .set(enabled)
         .expect("OSC_ENABLED already initialized");
 }
 
-/// Check if OSC progress is enabled
+/// Checks if OSC progress is enabled.
+///
+/// Returns `true` if OSC progress sequences will be sent to the terminal.
+/// This is `true` by default unless disabled via [`configure`].
 pub(crate) fn is_enabled() -> bool {
     *OSC_ENABLED.get_or_init(|| true)
 }
 
-/// OSC 9;4 states for terminal progress indication
+/// OSC 9;4 progress states for terminal progress indication.
+///
+/// These states control how the terminal displays the progress indicator.
+/// The exact visual appearance depends on the terminal emulator, but generally:
+///
+/// - [`Normal`](ProgressState::Normal) - Blue/cyan progress bar
+/// - [`Error`](ProgressState::Error) - Red progress bar
+/// - [`Warning`](ProgressState::Warning) - Yellow progress bar
+/// - [`Indeterminate`](ProgressState::Indeterminate) - Animated/pulsing indicator
+/// - [`None`](ProgressState::None) - No indicator (clears existing)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressState {
-    /// No progress indicator (clears any existing progress)
+    /// Clears any existing progress indicator.
     None,
-    /// Normal progress bar with percentage (typically shows as default color, often blue/cyan)
+    /// Normal progress state, typically displayed as blue or cyan.
+    /// Use this for standard progress updates.
     Normal,
-    /// Error state (typically shows as red)
+    /// Error state, typically displayed as red.
+    /// Use this when a job has failed.
     Error,
-    /// Indeterminate progress (spinner/activity indicator)
+    /// Indeterminate progress, typically displayed as an animated indicator.
+    /// Use this when progress percentage is unknown.
     Indeterminate,
-    /// Warning state (typically shows as yellow)
+    /// Warning state, typically displayed as yellow.
+    /// Use this when a job completed with warnings.
     Warning,
 }
 
@@ -48,7 +108,12 @@ impl ProgressState {
     }
 }
 
-/// Checks if the current terminal supports OSC 9;4 progress sequences
+/// Checks if the current terminal supports OSC 9;4 progress sequences.
+///
+/// Detection is based on environment variables:
+/// - `TERM_PROGRAM` - Detects Ghostty, VS Code, iTerm, WezTerm, Alacritty
+/// - `WT_SESSION` - Detects Windows Terminal
+/// - `VTE_VERSION` - Detects VTE-based terminals (GNOME Terminal, etc.)
 fn terminal_supports_osc_9_4() -> bool {
     static SUPPORTS_OSC_9_4: OnceLock<bool> = OnceLock::new();
 
@@ -82,11 +147,16 @@ fn terminal_supports_osc_9_4() -> bool {
     })
 }
 
-/// Sends an OSC 9;4 sequence to set terminal progress
+/// Sends an OSC 9;4 sequence to set terminal progress.
+///
+/// This is called automatically by the progress system and typically doesn't need
+/// to be called directly.
 ///
 /// # Arguments
+///
 /// * `state` - The progress state to display
-/// * `progress` - Progress percentage (0-100), ignored if state is None or Indeterminate
+/// * `progress` - Progress percentage (0-100), clamped if greater than 100.
+///   Ignored if state is `None` or `Indeterminate`.
 pub(crate) fn set_progress(state: ProgressState, progress: u8) {
     let progress = progress.min(100);
     let _ = write_progress(state, progress);
@@ -111,7 +181,9 @@ fn write_progress(state: ProgressState, progress: u8) -> std::io::Result<()> {
     stderr.flush()
 }
 
-/// Clears any terminal progress indicator
+/// Clears any terminal progress indicator.
+///
+/// This is called automatically when progress jobs stop or complete.
 pub(crate) fn clear_progress() {
     if is_enabled() {
         set_progress(ProgressState::None, 0);
