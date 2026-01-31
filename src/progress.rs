@@ -2299,10 +2299,11 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     tera.register_function(
         "count_format",
         move |props: &HashMap<String, tera::Value>| {
+            // Clamp negative values to 0 to prevent integer wraparound
             let value = props
                 .get("value")
                 .and_then(|v| v.as_i64())
-                .map(|v| v as usize)
+                .map(|v| v.max(0) as usize)
                 .or_else(|| progress.map(|(cur, _)| cur));
 
             if let Some(n) = value {
