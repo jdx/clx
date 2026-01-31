@@ -772,6 +772,8 @@ impl ProgressJobBuilder {
             progress_current: Mutex::new(self.progress_current),
             progress_total: Mutex::new(self.progress_total),
             start: Instant::now(),
+            last_progress_update: Mutex::new(None),
+            smoothed_rate: Mutex::new(None),
         }
     }
 
@@ -910,6 +912,10 @@ pub struct ProgressJob {
     progress_current: Mutex<Option<usize>>,
     progress_total: Mutex<Option<usize>>,
     start: Instant,
+    /// Last progress update time and value (for rate calculation)
+    last_progress_update: Mutex<Option<(Instant, usize)>>,
+    /// Exponentially smoothed rate (items per second)
+    smoothed_rate: Mutex<Option<f64>>,
 }
 
 impl ProgressJob {
@@ -1139,6 +1145,31 @@ impl ProgressJob {
         if let Some(total) = *self.progress_total.lock().unwrap() {
             current = current.min(total);
         }
+
+        // Update smoothed rate for ETA calculation
+        let now = Instant::now();
+        {
+            let mut last_update = self.last_progress_update.lock().unwrap();
+            if let Some((last_time, last_value)) = *last_update {
+                let elapsed = now.duration_since(last_time).as_secs_f64();
+                if elapsed > 0.001 && current > last_value {
+                    // Calculate instantaneous rate
+                    let items_processed = (current - last_value) as f64;
+                    let instantaneous_rate = items_processed / elapsed;
+
+                    // Update smoothed rate using exponential moving average
+                    // Alpha of 0.3 gives good balance between responsiveness and stability
+                    const ALPHA: f64 = 0.3;
+                    let mut smoothed = self.smoothed_rate.lock().unwrap();
+                    *smoothed = Some(match *smoothed {
+                        Some(old_rate) => ALPHA * instantaneous_rate + (1.0 - ALPHA) * old_rate,
+                        None => instantaneous_rate,
+                    });
+                }
+            }
+            *last_update = Some((now, current));
+        }
+
         *self.progress_current.lock().unwrap() = Some(current);
         self.prop("cur", &current); // prop() calls update()
     }
@@ -1153,6 +1184,57 @@ impl ProgressJob {
         }
         *self.progress_total.lock().unwrap() = Some(total);
         self.prop("total", &total); // prop() calls update()
+    }
+
+    /// Increments the current progress value by the specified amount.
+    ///
+    /// This is a convenience method equivalent to getting the current progress
+    /// and adding `n` to it. If no progress has been set yet, starts from 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::{ProgressJobBuilder, ProgressStatus};
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .body("{{ spinner() }} {{ message }} {{ progress_bar(flex=true) }}")
+    ///     .prop("message", "Processing items")
+    ///     .progress_total(100)
+    ///     .start();
+    ///
+    /// // Process items one at a time
+    /// for _ in 0..100 {
+    ///     // do work...
+    ///     job.increment(1);
+    /// }
+    /// job.set_status(ProgressStatus::Done);
+    /// ```
+    pub fn increment(&self, n: usize) {
+        let current = self.progress_current.lock().unwrap().unwrap_or(0);
+        self.progress_current(current + n);
+    }
+
+    /// Sets the message property.
+    ///
+    /// This is a convenience method equivalent to `job.prop("message", msg)`.
+    /// The message is commonly used in progress templates to show status text.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use clx::progress::{ProgressJobBuilder, ProgressStatus};
+    ///
+    /// let job = ProgressJobBuilder::new()
+    ///     .body("{{ spinner() }} {{ message }}")
+    ///     .prop("message", "Starting...")
+    ///     .start();
+    ///
+    /// job.message("Processing...");
+    /// job.message("Almost done...");
+    /// job.set_status(ProgressStatus::Done);
+    /// ```
+    pub fn message(&self, msg: &str) {
+        self.prop("message", msg);
     }
 
     /// Triggers a display update for this job.
@@ -1847,16 +1929,34 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     });
 
     // eta() - estimated time remaining based on progress
+    // Uses smoothed rate when available for more stable estimates
     // Options:
     //   hide_complete: bool - if true, return empty string when progress is complete or no ETA available
+    let smoothed_rate = *job.smoothed_rate.lock().unwrap();
     let (eta_value, eta_is_complete) = if let Some((cur, total)) = progress {
         if cur > 0 && total > 0 && cur <= total {
-            let progress_ratio = cur as f64 / total as f64;
-            let estimated_total = job_elapsed_secs / progress_ratio;
-            let remaining = estimated_total - job_elapsed_secs;
-            if remaining > 0.0 {
+            let remaining_items = (total - cur) as f64;
+
+            // Prefer smoothed rate for more stable ETA, fall back to linear extrapolation
+            let remaining_secs = if let Some(rate) = smoothed_rate {
+                if rate > 0.0 {
+                    remaining_items / rate
+                } else {
+                    // Fall back to linear extrapolation
+                    let progress_ratio = cur as f64 / total as f64;
+                    let estimated_total = job_elapsed_secs / progress_ratio;
+                    estimated_total - job_elapsed_secs
+                }
+            } else {
+                // No smoothed rate yet, use linear extrapolation
+                let progress_ratio = cur as f64 / total as f64;
+                let estimated_total = job_elapsed_secs / progress_ratio;
+                estimated_total - job_elapsed_secs
+            };
+
+            if remaining_secs > 0.0 {
                 (
-                    Some(format_duration(Duration::from_secs_f64(remaining))),
+                    Some(format_duration(Duration::from_secs_f64(remaining_secs))),
                     false,
                 )
             } else {
@@ -1881,16 +1981,22 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     });
 
     // rate() - items per second (or per minute if slow)
+    // Uses smoothed rate when available for more stable display
     let rate_str = if let Some((cur, _total)) = progress {
-        if job_elapsed_secs > 0.0 && cur > 0 {
-            let rate = cur as f64 / job_elapsed_secs;
-            if rate >= 1.0 {
-                format!("{:.1}/s", rate)
-            } else if rate >= 1.0 / 60.0 {
-                format!("{:.1}/m", rate * 60.0)
+        // Prefer smoothed rate, fall back to average rate
+        let rate = smoothed_rate.unwrap_or_else(|| {
+            if job_elapsed_secs > 0.0 && cur > 0 {
+                cur as f64 / job_elapsed_secs
             } else {
-                format!("{:.2}/s", rate)
+                0.0
             }
+        });
+        if rate >= 1.0 {
+            format!("{:.1}/s", rate)
+        } else if rate >= 1.0 / 60.0 {
+            format!("{:.1}/m", rate * 60.0)
+        } else if rate > 0.0 {
+            format!("{:.2}/s", rate)
         } else {
             "-/s".to_string()
         }
@@ -2781,5 +2887,56 @@ mod tests {
         assert!(debug_str.contains("ProgressJob"));
         assert!(debug_str.contains("id:"));
         assert!(debug_str.contains("Running"));
+    }
+
+    #[test]
+    fn test_increment() {
+        let job = ProgressJobBuilder::new().progress_total(100).build();
+
+        // Initial progress is None, increment starts from 0
+        job.increment(10);
+        assert_eq!(*job.progress_current.lock().unwrap(), Some(10));
+
+        // Increment adds to current
+        job.increment(5);
+        assert_eq!(*job.progress_current.lock().unwrap(), Some(15));
+
+        // Increment is clamped to total
+        job.increment(100);
+        assert_eq!(*job.progress_current.lock().unwrap(), Some(100));
+    }
+
+    #[test]
+    fn test_increment_without_total() {
+        let job = ProgressJobBuilder::new().build();
+
+        // Without total, increment still works
+        job.increment(10);
+        assert_eq!(*job.progress_current.lock().unwrap(), Some(10));
+
+        job.increment(20);
+        assert_eq!(*job.progress_current.lock().unwrap(), Some(30));
+    }
+
+    #[test]
+    fn test_message() {
+        let job = ProgressJobBuilder::new().build();
+
+        job.message("Hello");
+        let ctx = job.tera_ctx.lock().unwrap();
+        let msg = ctx.get("message").and_then(|v| v.as_str());
+        assert_eq!(msg, Some("Hello"));
+    }
+
+    #[test]
+    fn test_smoothed_rate_initialization() {
+        let job = ProgressJobBuilder::new().progress_total(100).build();
+
+        // Initially no smoothed rate
+        assert!(job.smoothed_rate.lock().unwrap().is_none());
+
+        // After first update, still no rate (need two points)
+        job.progress_current(10);
+        assert!(job.smoothed_rate.lock().unwrap().is_none());
     }
 }
