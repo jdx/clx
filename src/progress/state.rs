@@ -4,6 +4,7 @@
 //! display system, including job storage, terminal locking, and the background
 //! refresh thread.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, mpsc};
 use std::thread;
@@ -278,6 +279,10 @@ pub fn stop() {
     let _ = refresh_once();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
+    // Reset LINES to prevent subsequent stop_clear() from clearing user output
+    *LINES.lock().unwrap() = 0;
+    // Ensure all output is flushed before returning
+    let _ = std::io::stderr().flush();
 }
 
 /// Stops the progress display and clears it from the screen.
@@ -286,6 +291,8 @@ pub fn stop_clear() {
     let _ = clear();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
+    // Ensure all output is flushed before returning
+    let _ = std::io::stderr().flush();
 }
 
 // =============================================================================

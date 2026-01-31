@@ -422,9 +422,14 @@ impl ProgressJob {
         *index += 1;
         drop(index);
 
-        // Reset progress for the new operation
+        // Reset progress for the new operation (both internal state and template props)
         *self.progress_current.lock().unwrap() = None;
         *self.progress_total.lock().unwrap() = None;
+        {
+            let mut ctx = self.tera_ctx.lock().unwrap();
+            ctx.remove("cur");
+            ctx.remove("total");
+        }
 
         // Reset rate tracking for accurate ETA on new operation
         *self.last_progress_update.lock().unwrap() = None;
@@ -456,24 +461,28 @@ impl ProgressJob {
                 let op_idx = *self.operation_index.lock().unwrap();
                 // Use 1,000,000 as the scale for precision
                 let scale = 1_000_000usize;
-                let per_op = scale / ops;
+
+                // Use floating point to avoid integer division truncation
+                // This ensures 3 operations can reach exactly 100%
+                let per_op = scale as f64 / ops as f64;
 
                 // Progress from completed operations + progress within current operation
-                let completed_progress = op_idx * per_op;
+                let completed_progress = (op_idx as f64 * per_op) as usize;
                 let current_op_progress = if tot > 0 {
-                    (cur as f64 / tot as f64 * per_op as f64) as usize
+                    (cur as f64 / tot as f64 * per_op) as usize
                 } else {
                     0
                 };
 
-                Some((completed_progress + current_op_progress, scale))
+                // Clamp to scale to handle floating point rounding
+                Some(((completed_progress + current_op_progress).min(scale), scale))
             }
             // Multi-operation mode but no progress yet: show completed operations
-            (Some(ops), None, None) => {
+            (Some(ops), None, None) | (Some(ops), Some(_), None) | (Some(ops), None, Some(_)) => {
                 let op_idx = *self.operation_index.lock().unwrap();
                 let scale = 1_000_000usize;
-                let per_op = scale / ops;
-                Some((op_idx * per_op, scale))
+                let per_op = scale as f64 / ops as f64;
+                Some((((op_idx as f64 * per_op) as usize).min(scale), scale))
             }
             // Single operation mode: return raw values
             (None, Some(cur), Some(tot)) => Some((cur, tot)),
