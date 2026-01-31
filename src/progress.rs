@@ -366,7 +366,6 @@ impl ProgressJobBuilder {
 
     #[must_use = "the returned job handle is needed to control the job"]
     pub fn start(self) -> Arc<ProgressJob> {
-        crate::init();
         let job = Arc::new(self.build());
         JOBS.lock().unwrap().push(job.clone());
         job.update();
@@ -518,12 +517,11 @@ impl ProgressJob {
     }
 
     pub fn progress_current(&self, mut current: usize) {
-        self.prop("cur", &current);
         if let Some(total) = *self.progress_total.lock().unwrap() {
             current = current.min(total);
         }
         *self.progress_current.lock().unwrap() = Some(current);
-        self.update();
+        self.prop("cur", &current); // prop() calls update()
     }
 
     pub fn progress_total(&self, mut total: usize) {
@@ -531,8 +529,7 @@ impl ProgressJob {
             total = total.max(current);
         }
         *self.progress_total.lock().unwrap() = Some(total);
-        self.prop("total", &total);
-        self.update();
+        self.prop("total", &total); // prop() calls update()
     }
 
     pub fn update(&self) {
