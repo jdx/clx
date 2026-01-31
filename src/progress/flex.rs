@@ -54,39 +54,8 @@ fn process_flex_fill_tags(s: &str, width: usize) -> Option<String> {
     if flex_fill_count < 2 {
         return None;
     }
-
-    let parts = s.splitn(3, "<clx:flex_fill>").collect::<Vec<_>>();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    let prefix = parts[0];
-    let content = parts[1];
-    let suffix = if parts.len() == 3 { parts[2] } else { "" };
-
-    let prefix_width = console::measure_text_width(prefix);
-    let suffix_width = console::measure_text_width(suffix);
-    let content_width = console::measure_text_width(content);
-    let available_for_content = width.saturating_sub(prefix_width + suffix_width);
-
-    let mut result = String::new();
-    result.push_str(prefix);
-
-    if content_width >= available_for_content {
-        // Truncate if content is too long
-        if available_for_content > 3 {
-            result.push_str(&console::truncate_str(content, available_for_content, "…"));
-        } else {
-            result.push_str(content);
-        }
-    } else {
-        // Pad with spaces to fill available width
-        result.push_str(content);
-        let padding = available_for_content.saturating_sub(content_width);
-        result.push_str(&" ".repeat(padding));
-    }
-    result.push_str(suffix);
-    Some(result)
+    // Delegate to the single-line processor which has the same logic
+    process_line_flex_fill(s, width)
 }
 
 /// Process `<clx:flex>` tags (truncates content to fit).
