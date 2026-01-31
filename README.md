@@ -15,7 +15,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-clx = "0.3.2"
+clx = "1"
 ```
 
 ## Usage
