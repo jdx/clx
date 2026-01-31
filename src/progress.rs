@@ -1102,24 +1102,34 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     });
 
     // eta() - estimated time remaining based on progress
-    let eta_str = if let Some((cur, total)) = progress {
+    // Options:
+    //   hide_complete: bool - if true, return empty string when progress is complete or no ETA available
+    let (eta_str, eta_is_complete) = if let Some((cur, total)) = progress {
         if cur > 0 && total > 0 && cur <= total {
             let progress_ratio = cur as f64 / total as f64;
             let estimated_total = job_elapsed_secs / progress_ratio;
             let remaining = estimated_total - job_elapsed_secs;
             if remaining > 0.0 {
-                format_duration(Duration::from_secs_f64(remaining))
+                (format_duration(Duration::from_secs_f64(remaining)), false)
             } else {
-                "0s".to_string()
+                ("0s".to_string(), true) // 0s means complete
             }
         } else {
-            "-".to_string()
+            ("-".to_string(), cur >= total) // "-" with cur >= total means complete
         }
     } else {
-        "-".to_string()
+        ("-".to_string(), false)
     };
-    tera.register_function("eta", move |_: &HashMap<String, tera::Value>| {
-        Ok(eta_str.clone().into())
+    tera.register_function("eta", move |props: &HashMap<String, tera::Value>| {
+        let hide_complete = props
+            .get("hide_complete")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if hide_complete && (eta_is_complete || eta_str == "-") {
+            Ok("".to_string().into())
+        } else {
+            Ok(eta_str.clone().into())
+        }
     });
 
     // rate() - items per second (or per minute if slow)
@@ -1169,10 +1179,22 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
             ProgressStatus::Warn => Ok(style::eyellow("⚠").to_string().into()),
         },
     );
+    // progress_bar() - render a progress bar
+    // Options:
+    //   width: i64 - fixed width (negative values subtract from terminal width)
+    //   flex: bool - use flexible width
+    //   hide_complete: bool - if true, return empty string when progress is 100%
     tera.register_function(
         "progress_bar",
         move |props: &HashMap<String, tera::Value>| {
             if let Some((progress_current, progress_total)) = progress {
+                let hide_complete = props
+                    .get("hide_complete")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if hide_complete && progress_current >= progress_total {
+                    return Ok("".to_string().into());
+                }
                 let is_flex = props
                     .get("flex")
                     .as_ref()
