@@ -3026,8 +3026,11 @@ mod log_integration {
         ///
         /// Returns an error if a logger has already been set.
         pub fn init(self) -> std::result::Result<(), SetLoggerError> {
-            log::set_max_level(self.level);
-            log::set_boxed_logger(Box::new(self))
+            let level = self.level;
+            // Set logger first to avoid modifying max level if logger installation fails
+            log::set_boxed_logger(Box::new(self))?;
+            log::set_max_level(level);
+            Ok(())
         }
 
         fn format_message(&self, record: &Record) -> String {
@@ -3063,9 +3066,13 @@ mod log_integration {
             let was_paused = is_paused();
 
             // Pause progress if it's running
-            if !was_paused && *STARTED.lock().unwrap() {
+            // Track whether we actually paused to avoid race condition
+            let did_pause = if !was_paused && *STARTED.lock().unwrap() {
                 pause();
-            }
+                true
+            } else {
+                false
+            };
 
             // Write the log message with terminal lock held
             {
@@ -3074,8 +3081,8 @@ mod log_integration {
                 let _ = writeln!(stderr, "{}", message);
             }
 
-            // Resume progress if we paused it
-            if !was_paused && *STARTED.lock().unwrap() {
+            // Resume progress only if we paused it
+            if did_pause {
                 resume();
             }
         }
