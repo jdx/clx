@@ -353,20 +353,21 @@ impl ProgressJob {
         let update_rate = {
             let now = Instant::now();
             let mut last_update = self.last_progress_update.lock().unwrap();
-            if let Some((last_time, last_value)) = *last_update {
+            let rate = if let Some((last_time, last_value)) = *last_update {
                 let elapsed = now.duration_since(last_time).as_secs_f64();
                 if elapsed > 0.001 && new_current > last_value {
                     let items_processed = (new_current - last_value) as f64;
                     let instantaneous_rate = items_processed / elapsed;
-                    *last_update = Some((now, new_current));
                     Some(instantaneous_rate)
                 } else {
                     None
                 }
             } else {
-                *last_update = Some((now, new_current));
                 None
-            }
+            };
+            // Always update last_progress_update to track the current position
+            *last_update = Some((now, new_current));
+            rate
         };
 
         if let Some(instantaneous_rate) = update_rate {

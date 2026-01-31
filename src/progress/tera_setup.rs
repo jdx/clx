@@ -307,7 +307,9 @@ fn register_progress_bar_function(tera: &mut Tera, progress: Option<(usize, usiz
 }
 
 /// Build progress bar characters from template props.
-fn build_progress_bar_chars(props: &HashMap<String, tera::Value>) -> progress_bar::ProgressBarChars {
+fn build_progress_bar_chars(
+    props: &HashMap<String, tera::Value>,
+) -> progress_bar::ProgressBarChars {
     // Check for preset style first
     if let Some(style) = props.get("style").and_then(|v| v.as_str()) {
         match style {

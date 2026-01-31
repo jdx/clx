@@ -307,8 +307,8 @@ pub use state::{
 
 #[cfg(feature = "log")]
 pub use log::{
-    ProgressLogger, init_log_integration, init_log_integration_with_level, try_init_log_integration,
-    try_init_log_integration_with_level,
+    ProgressLogger, init_log_integration, init_log_integration_with_level,
+    try_init_log_integration, try_init_log_integration_with_level,
 };
 
 #[cfg(test)]

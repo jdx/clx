@@ -25,7 +25,7 @@
 //! job.set_status(ProgressStatus::Done);
 //! ```
 
-use super::state::{is_paused, pause, resume, STARTED, TERM_LOCK};
+use super::state::{STARTED, TERM_LOCK, is_paused, pause, resume};
 use crate::style;
 use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
 use std::io::Write;
