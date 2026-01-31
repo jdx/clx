@@ -508,7 +508,13 @@ impl ProgressJob {
             self.update();
             // For terminal states, do a synchronous render to ensure the final state is visible
             // before the process potentially exits
-            if matches!(status, ProgressStatus::Done | ProgressStatus::Failed | ProgressStatus::Warn | ProgressStatus::DoneCustom(_)) {
+            if matches!(
+                status,
+                ProgressStatus::Done
+                    | ProgressStatus::Failed
+                    | ProgressStatus::Warn
+                    | ProgressStatus::DoneCustom(_)
+            ) {
                 let _ = refresh_once();
             }
         }
