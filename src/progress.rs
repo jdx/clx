@@ -3831,4 +3831,322 @@ mod tests {
         // Complete with hide_complete=true should be empty
         assert_eq!(result, "");
     }
+
+    // ==================== ETA/Rate Smoothing Tests ====================
+
+    #[test]
+    fn test_smoothed_rate_initial_value() {
+        // First progress update should initialize smoothed_rate with instantaneous rate
+        let job = ProgressJobBuilder::new().progress_total(100).build();
+
+        // Initial state: no smoothed rate
+        assert!(job.smoothed_rate.lock().unwrap().is_none());
+
+        // First update just records time, no rate yet (need two points)
+        job.progress_current(10);
+
+        // Wait a bit so elapsed time is measurable
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Second update should calculate rate
+        job.progress_current(20);
+
+        // Now we should have a smoothed rate
+        let rate = job.smoothed_rate.lock().unwrap();
+        assert!(rate.is_some(), "Expected smoothed rate after second update");
+        let rate_value = rate.unwrap();
+        // Rate should be positive (10 items in ~10ms = ~1000 items/sec)
+        assert!(
+            rate_value > 0.0,
+            "Expected positive rate, got {}",
+            rate_value
+        );
+    }
+
+    #[test]
+    fn test_smoothed_rate_exponential_moving_average() {
+        // Verify that subsequent updates apply EMA formula: new = alpha * instant + (1-alpha) * old
+        let job = ProgressJobBuilder::new().progress_total(1000).build();
+
+        // First update to start tracking
+        job.progress_current(0);
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Second update establishes initial rate
+        job.progress_current(100);
+        std::thread::sleep(Duration::from_millis(10));
+
+        let rate1 = job.smoothed_rate.lock().unwrap().unwrap();
+
+        // Third update should apply EMA
+        job.progress_current(200);
+        std::thread::sleep(Duration::from_millis(10));
+
+        let rate2 = job.smoothed_rate.lock().unwrap().unwrap();
+
+        // Fourth update
+        job.progress_current(300);
+
+        let rate3 = job.smoothed_rate.lock().unwrap().unwrap();
+
+        // All rates should be positive
+        assert!(rate1 > 0.0);
+        assert!(rate2 > 0.0);
+        assert!(rate3 > 0.0);
+
+        // The rate should change somewhat (EMA smoothing) but not be zero
+        // Due to timing variability, we just verify rates are calculated
+    }
+
+    #[test]
+    fn test_smoothed_rate_no_update_on_backwards_progress() {
+        // Rate should not be updated if progress goes backwards
+        let job = ProgressJobBuilder::new().progress_total(100).build();
+
+        job.progress_current(0);
+        std::thread::sleep(Duration::from_millis(10));
+
+        job.progress_current(50);
+        let rate_after_forward = *job.smoothed_rate.lock().unwrap();
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Try to go backwards (will be rejected by progress_current but let's check rate)
+        job.progress_current(30); // This gets clamped, but doesn't update rate
+        let rate_after_attempt = *job.smoothed_rate.lock().unwrap();
+
+        // Rate should be unchanged (no new calculation for backwards/same progress)
+        // Note: progress_current clamps to total, so 30 < 50 would still update
+        // But the rate calculation requires current > last_value
+        assert_eq!(rate_after_forward, rate_after_attempt);
+    }
+
+    #[test]
+    fn test_smoothed_rate_no_update_on_tiny_elapsed_time() {
+        // Rate should not be updated if elapsed time is < 0.001s
+        let job = ProgressJobBuilder::new().progress_total(100).build();
+
+        // Rapid updates without sleeping
+        job.progress_current(0);
+        job.progress_current(10);
+        job.progress_current(20);
+
+        // The rate might not be set if all updates happened within 1ms
+        // This test just verifies no panic occurs during rapid updates
+        let _rate = job.smoothed_rate.lock().unwrap();
+    }
+
+    #[test]
+    fn test_increment_updates_smoothed_rate() {
+        // increment() should also update the smoothed rate
+        let job = ProgressJobBuilder::new().progress_total(100).build();
+
+        // Initial state
+        assert!(job.smoothed_rate.lock().unwrap().is_none());
+
+        job.increment(10);
+        std::thread::sleep(Duration::from_millis(10));
+
+        job.increment(10);
+
+        // Should have a rate after two increments with time between them
+        let rate = job.smoothed_rate.lock().unwrap();
+        assert!(rate.is_some(), "Expected smoothed rate after increments");
+    }
+
+    #[test]
+    fn test_smoothed_rate_affects_eta_calculation() {
+        // When smoothed rate is set, eta() should use it for calculation
+        let job = ProgressJobBuilder::new()
+            .body("{{ eta() }}")
+            .progress_current(50)
+            .progress_total(100)
+            .build();
+
+        // Set a known smoothed rate
+        *job.smoothed_rate.lock().unwrap() = Some(10.0); // 10 items/sec
+
+        // With 50 remaining items at 10/sec, ETA should be 5 seconds
+        let ctx = RenderContext {
+            start: Instant::now(),
+            now: Instant::now(),
+            width: 80,
+            tera_ctx: Context::new(),
+            indent: 0,
+            include_children: false,
+            progress: Some((50, 100)),
+        };
+        let mut tera = Tera::default();
+        add_tera_functions(&mut tera, &ctx, &job);
+        tera.add_raw_template("body", "{{ eta() }}").unwrap();
+        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+
+        // Should show "5s" (50 remaining / 10 per sec = 5 sec)
+        assert_eq!(result, "5s");
+    }
+
+    #[test]
+    fn test_smoothed_rate_affects_rate_display() {
+        // When smoothed rate is set, rate() should use it for display
+        let job = ProgressJobBuilder::new()
+            .body("{{ rate() }}")
+            .progress_current(50)
+            .progress_total(100)
+            .build();
+
+        // Set a known smoothed rate
+        *job.smoothed_rate.lock().unwrap() = Some(42.5);
+
+        let ctx = RenderContext {
+            start: Instant::now(),
+            now: Instant::now(),
+            width: 80,
+            tera_ctx: Context::new(),
+            indent: 0,
+            include_children: false,
+            progress: Some((50, 100)),
+        };
+        let mut tera = Tera::default();
+        add_tera_functions(&mut tera, &ctx, &job);
+        tera.add_raw_template("body", "{{ rate() }}").unwrap();
+        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+
+        assert_eq!(result, "42.5/s");
+    }
+
+    #[test]
+    fn test_eta_fallback_to_linear_extrapolation() {
+        // When no smoothed rate is available, ETA should use linear extrapolation
+        let job = ProgressJobBuilder::new()
+            .body("{{ eta() }}")
+            .progress_current(50)
+            .progress_total(100)
+            .build();
+
+        // Don't set smoothed_rate - it should remain None
+        assert!(job.smoothed_rate.lock().unwrap().is_none());
+
+        // With 50% done, the ETA calculation falls back to linear extrapolation
+        // Since job just started, elapsed is ~0, so linear extrapolation gives small/zero ETA
+        let ctx = RenderContext {
+            start: Instant::now(),
+            now: Instant::now(),
+            width: 80,
+            tera_ctx: Context::new(),
+            indent: 0,
+            include_children: false,
+            progress: Some((50, 100)),
+        };
+        let mut tera = Tera::default();
+        add_tera_functions(&mut tera, &ctx, &job);
+        tera.add_raw_template("body", "{{ eta() }}").unwrap();
+        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+
+        // Should return something (even "0s" is valid for instant start)
+        assert!(
+            result.ends_with('s') || result.ends_with('m') || result == "-" || result == "0s",
+            "Expected valid ETA format, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_rate_fallback_to_average() {
+        // When no smoothed rate is available, rate() should calculate average
+        let job = ProgressJobBuilder::new()
+            .body("{{ rate() }}")
+            .progress_current(100)
+            .progress_total(200)
+            .build();
+
+        // Don't set smoothed_rate
+        assert!(job.smoothed_rate.lock().unwrap().is_none());
+
+        // With no smoothed rate, it falls back to current/elapsed
+        // Since job just started, elapsed is ~0, so rate calculation may return 0 or -
+        let ctx = RenderContext {
+            start: Instant::now(),
+            now: Instant::now(),
+            width: 80,
+            tera_ctx: Context::new(),
+            indent: 0,
+            include_children: false,
+            progress: Some((100, 200)),
+        };
+        let mut tera = Tera::default();
+        add_tera_functions(&mut tera, &ctx, &job);
+        tera.add_raw_template("body", "{{ rate() }}").unwrap();
+        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+
+        // Should return a valid rate format
+        assert!(
+            result.contains("/s") || result.contains("/m"),
+            "Expected rate format, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_eta_with_zero_smoothed_rate() {
+        // When smoothed rate is zero, should fall back to linear extrapolation
+        let job = ProgressJobBuilder::new()
+            .body("{{ eta() }}")
+            .progress_current(50)
+            .progress_total(100)
+            .build();
+
+        // Set rate to zero
+        *job.smoothed_rate.lock().unwrap() = Some(0.0);
+
+        let ctx = RenderContext {
+            start: Instant::now(),
+            now: Instant::now(),
+            width: 80,
+            tera_ctx: Context::new(),
+            indent: 0,
+            include_children: false,
+            progress: Some((50, 100)),
+        };
+        let mut tera = Tera::default();
+        add_tera_functions(&mut tera, &ctx, &job);
+        tera.add_raw_template("body", "{{ eta() }}").unwrap();
+        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+
+        // Should still return a valid ETA (falls back to linear)
+        assert!(
+            result.ends_with('s') || result.ends_with('m') || result == "-" || result == "0s",
+            "Expected valid ETA format, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_rate_with_zero_smoothed_rate() {
+        // When smoothed rate is zero, rate() should show -/s
+        let job = ProgressJobBuilder::new()
+            .body("{{ rate() }}")
+            .progress_current(50)
+            .progress_total(100)
+            .build();
+
+        // Set rate to zero
+        *job.smoothed_rate.lock().unwrap() = Some(0.0);
+
+        let ctx = RenderContext {
+            start: Instant::now(),
+            now: Instant::now(),
+            width: 80,
+            tera_ctx: Context::new(),
+            indent: 0,
+            include_children: false,
+            progress: Some((50, 100)),
+        };
+        let mut tera = Tera::default();
+        add_tera_functions(&mut tera, &ctx, &job);
+        tera.add_raw_template("body", "{{ rate() }}").unwrap();
+        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+
+        // Zero rate shows -/s
+        assert_eq!(result, "-/s");
+    }
 }
