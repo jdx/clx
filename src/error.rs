@@ -74,7 +74,11 @@ mod tests {
 
         // The error message should be the underlying io error message
         let msg = error.to_string();
-        assert!(msg.contains("access denied"), "Expected 'access denied' in: {}", msg);
+        assert!(
+            msg.contains("access denied"),
+            "Expected 'access denied' in: {}",
+            msg
+        );
     }
 
     #[test]
@@ -101,8 +105,16 @@ mod tests {
         let error = Error::ScriptFailed("test_script".to_string(), Some(output.status));
         let msg = error.to_string();
 
-        assert!(msg.contains("test_script"), "Expected script name in: {}", msg);
-        assert!(msg.contains("exit code 42"), "Expected exit code 42 in: {}", msg);
+        assert!(
+            msg.contains("test_script"),
+            "Expected script name in: {}",
+            msg
+        );
+        assert!(
+            msg.contains("exit code 42"),
+            "Expected exit code 42 in: {}",
+            msg
+        );
         assert!(
             msg.contains("exited with non-zero status"),
             "Expected 'exited with non-zero status' in: {}",
