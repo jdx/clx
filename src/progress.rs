@@ -1,3 +1,146 @@
+//! Hierarchical progress indicators with spinners and template rendering.
+//!
+//! This module provides a flexible progress display system for CLI applications.
+//! Progress jobs can be nested hierarchically, support animated spinners, and use
+//! Tera templates for customizable rendering.
+//!
+//! # Threading Model
+//!
+//! The progress system is designed for safe concurrent access from multiple threads.
+//! Understanding its threading model helps when integrating with multi-threaded
+//! applications or debugging synchronization issues.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │                         Main Thread(s)                              │
+//! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                 │
+//! │  │  Worker 1   │  │  Worker 2   │  │  Worker N   │                 │
+//! │  │ job.prop()  │  │ job.prop()  │  │ job.prop()  │                 │
+//! │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                 │
+//! │         │                │                │                         │
+//! │         ▼                ▼                ▼                         │
+//! │  ┌────────────────────────────────────────────────────┐            │
+//! │  │              JOBS (Mutex<Vec<Arc<ProgressJob>>>)   │            │
+//! │  │  • Stores all top-level jobs                       │            │
+//! │  │  • Each job has interior mutability via Mutex      │            │
+//! │  └────────────────────────────────────────────────────┘            │
+//! │                          │                                          │
+//! │                          │ notify()                                 │
+//! │                          ▼                                          │
+//! │  ┌────────────────────────────────────────────────────┐            │
+//! │  │              NOTIFY (mpsc::Sender)                 │            │
+//! │  │  • Wakes background thread for immediate refresh   │            │
+//! │  └────────────────────────────────────────────────────┘            │
+//! └─────────────────────────────────────────────────────────────────────┘
+//!                            │
+//!                            ▼
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │                      Background Thread                              │
+//! │  ┌────────────────────────────────────────────────────┐            │
+//! │  │                   refresh()                        │            │
+//! │  │  1. Acquire REFRESH_LOCK                           │            │
+//! │  │  2. Clone JOBS snapshot                            │            │
+//! │  │  3. Render all jobs via Tera                       │            │
+//! │  │  4. Acquire TERM_LOCK                              │            │
+//! │  │  5. Clear previous output + write new              │            │
+//! │  │  6. Release TERM_LOCK                              │            │
+//! │  │  7. Wait on NOTIFY or timeout (INTERVAL)           │            │
+//! │  └────────────────────────────────────────────────────┘            │
+//! └─────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Global State
+//!
+//! | Static | Type | Purpose |
+//! |--------|------|---------|
+//! | `JOBS` | `Mutex<Vec<Arc<ProgressJob>>>` | All top-level progress jobs |
+//! | `TERM_LOCK` | `Mutex<()>` | Serializes terminal write operations |
+//! | `REFRESH_LOCK` | `Mutex<()>` | Prevents concurrent refresh cycles |
+//! | `STARTED` | `Mutex<bool>` | Whether background thread is running |
+//! | `PAUSED` | `AtomicBool` | Whether refresh is temporarily paused |
+//! | `STOPPING` | `AtomicBool` | Signal to stop the background thread |
+//! | `INTERVAL` | `Mutex<Duration>` | Refresh interval (default 200ms) |
+//! | `NOTIFY` | `Mutex<Option<mpsc::Sender>>` | Channel to wake background thread |
+//!
+//! ## Background Thread Lifecycle
+//!
+//! 1. **Start**: First call to `notify()` spawns the background thread via `start()`
+//! 2. **Loop**: Thread alternates between rendering and waiting for notifications
+//! 3. **Smart Refresh**: Skips terminal writes if output unchanged and no spinners animating
+//! 4. **Stop**: When no active jobs remain, thread exits automatically
+//!
+//! The background thread is lazy - it only starts when the first job update occurs,
+//! and stops automatically when all jobs complete.
+//!
+//! ## Notification System
+//!
+//! Job updates call `notify()` which:
+//! 1. Ensures the background thread is started
+//! 2. Sends a message on the `NOTIFY` channel
+//! 3. This wakes the background thread for immediate refresh
+//!
+//! Without notifications, the thread waits for `INTERVAL` between refreshes.
+//!
+//! ## Terminal Lock Usage
+//!
+//! The `TERM_LOCK` serializes all terminal output to prevent interleaved writes:
+//!
+//! - The background thread holds it during clear/write operations
+//! - `with_terminal_lock()` lets external code acquire it for safe printing
+//! - `pause()`/`resume()` clear and restore display while allowing external writes
+//!
+//! ## Thread Safety Guarantees
+//!
+//! - **Job updates are atomic**: Each field update acquires its own mutex
+//! - **Display is consistent**: `REFRESH_LOCK` ensures complete render cycles
+//! - **No interleaved output**: `TERM_LOCK` serializes all terminal writes
+//! - **Safe concurrent access**: `Arc<ProgressJob>` can be shared across threads
+//!
+//! ## Text Mode
+//!
+//! When `ProgressOutput::Text` is active:
+//! - No background thread is started
+//! - Each `update()` call writes directly to stderr
+//! - Useful for CI/CD, piped output, or non-terminal environments
+//!
+//! ## Example: Multi-threaded Usage
+//!
+//! ```rust,no_run
+//! use clx::progress::{ProgressJobBuilder, ProgressStatus, with_terminal_lock};
+//! use std::sync::Arc;
+//! use std::thread;
+//!
+//! // Create a job that will be shared across threads
+//! let job = ProgressJobBuilder::new()
+//!     .prop("message", "Processing")
+//!     .progress_total(100)
+//!     .start();
+//!
+//! // Clone Arc for each worker thread
+//! let handles: Vec<_> = (0..4).map(|i| {
+//!     let job = Arc::clone(&job);
+//!     thread::spawn(move || {
+//!         for j in 0..25 {
+//!             // Safe concurrent progress updates
+//!             job.progress_current(i * 25 + j);
+//!
+//!             // Use terminal lock for custom output
+//!             with_terminal_lock(|| {
+//!                 eprintln!("Worker {} completed item {}", i, j);
+//!             });
+//!         }
+//!     })
+//! }).collect();
+//!
+//! for h in handles {
+//!     h.join().unwrap();
+//! }
+//!
+//! job.set_status(ProgressStatus::Done);
+//! ```
+
 use crate::{Result, progress_bar, style};
 use serde::ser::Serialize as SerializeTrait;
 use std::{
@@ -204,11 +347,30 @@ static SPINNERS: LazyLock<HashMap<String, Spinner>> = LazyLock::new(|| {
 });
 
 /// Refresh interval for the progress display.
+///
 /// Set to 200ms to match the fastest spinner frame rate (mini_dot, line, etc.).
 /// Spinners define their frame interval in milliseconds (e.g., 200 = change frame every 200ms).
 /// Using the minimum ensures smooth animation for all spinners.
+///
+/// See [`set_interval`] and [`interval`] for runtime configuration.
 static INTERVAL: Mutex<Duration> = Mutex::new(Duration::from_millis(200));
+
+/// Number of terminal lines currently occupied by progress output.
+///
+/// Used to calculate how many lines to clear before writing new output.
 static LINES: Mutex<usize> = Mutex::new(0);
+
+/// Global terminal lock for synchronizing output operations.
+///
+/// This lock is acquired during all terminal write operations to prevent
+/// interleaved output between progress display and other stderr writes.
+/// Use [`with_terminal_lock`] to acquire this lock for external output.
+///
+/// # Threading Considerations
+///
+/// - The background refresh thread holds this lock briefly during each render
+/// - External code should hold the lock only briefly to avoid blocking refresh
+/// - The lock is automatically acquired by `println()` method on jobs
 static TERM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Execute the provided function while holding the global terminal lock.
@@ -224,12 +386,44 @@ where
     drop(_guard);
     result
 }
+/// Lock to ensure only one refresh cycle runs at a time.
+///
+/// This prevents multiple threads from rendering simultaneously if notifications
+/// arrive faster than the refresh interval.
 static REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// Signal to stop the background refresh thread.
+///
+/// Set by [`stop`] and [`stop_clear`] to gracefully terminate the refresh loop.
 static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Channel to notify the background thread of updates.
+///
+/// When a job is updated, it sends on this channel to wake the background thread
+/// for an immediate refresh rather than waiting for the interval timeout.
 static NOTIFY: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+
+/// Whether the background refresh thread is currently running.
+///
+/// Set to `true` when the thread starts, `false` when it exits.
+/// Prevents spawning multiple refresh threads.
 static STARTED: Mutex<bool> = Mutex::new(false);
+
+/// Whether progress rendering is temporarily paused.
+///
+/// When paused, the display is cleared but jobs continue to track state.
+/// Set by [`pause`], cleared by [`resume`].
 static PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Collection of all top-level progress jobs.
+///
+/// Jobs are added via [`ProgressJobBuilder::start`] and removed when they
+/// complete (depending on [`ProgressJobDoneBehavior`]).
 static JOBS: Mutex<Vec<Arc<ProgressJob>>> = Mutex::new(vec![]);
+
+/// Shared Tera template engine instance.
+///
+/// Reused across refresh cycles to avoid recompiling templates.
 static TERA: Mutex<Option<Tera>> = Mutex::new(None);
 
 // OSC progress tracking state
@@ -716,6 +910,25 @@ pub fn flush() {
     }
 }
 
+/// Starts the background refresh thread if not already running.
+///
+/// # Threading Details
+///
+/// This function spawns a dedicated background thread that:
+/// 1. Wakes up at regular intervals (see [`INTERVAL`])
+/// 2. Can be woken early by notifications (see [`NOTIFY`])
+/// 3. Calls [`refresh`] to update the display
+/// 4. Automatically exits when no active jobs remain
+///
+/// The thread uses a simple loop that alternates between:
+/// - Sleeping until the next refresh time
+/// - Rendering the current state
+/// - Waiting for a notification or timeout
+///
+/// # Safety
+///
+/// The `STARTED` flag is set before spawning to prevent race conditions
+/// where multiple threads might try to start the refresh loop simultaneously.
 fn start() {
     let mut started = STARTED.lock().unwrap();
     if *started || output() == ProgressOutput::Text || STOPPING.load(Ordering::Relaxed) {
@@ -746,9 +959,28 @@ fn start() {
     });
 }
 
-// Cache for smart refresh - skip terminal writes when output is unchanged and no spinners animating
+/// Cache for smart refresh optimization.
+///
+/// Stores the last rendered output to skip terminal writes when unchanged
+/// and no spinners are animating.
 static LAST_OUTPUT: Mutex<String> = Mutex::new(String::new());
 
+/// Performs one refresh cycle of the progress display.
+///
+/// # Threading Details
+///
+/// This function:
+/// 1. Acquires `REFRESH_LOCK` to prevent concurrent refreshes
+/// 2. Takes a snapshot of the current jobs
+/// 3. Renders all jobs using Tera templates
+/// 4. Uses smart refresh: skips terminal writes if output unchanged
+/// 5. Acquires `TERM_LOCK` only for the actual terminal operations
+///
+/// # Returns
+///
+/// - `Ok(true)` - Continue the refresh loop
+/// - `Ok(false)` - Exit the refresh loop (no active jobs or stopping)
+/// - `Err(_)` - An error occurred during rendering
 fn refresh() -> Result<bool> {
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
     if STOPPING.load(Ordering::Relaxed) {
