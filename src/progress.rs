@@ -28,9 +28,14 @@ mod diagnostics {
     use std::sync::OnceLock;
 
     static LOG_PATH: OnceLock<Option<String>> = OnceLock::new();
+    static KEEP_ANSI: OnceLock<bool> = OnceLock::new();
 
     fn log_path() -> &'static Option<String> {
         LOG_PATH.get_or_init(|| std::env::var("CLX_TRACE_LOG").ok())
+    }
+
+    fn keep_ansi() -> bool {
+        *KEEP_ANSI.get_or_init(|| std::env::var("CLX_TRACE_RAW").is_ok())
     }
 
     /// Snapshot of a single job's state
@@ -123,8 +128,14 @@ mod diagnostics {
     pub fn log_frame(rendered: &str, jobs: &[Arc<ProgressJob>]) {
         let Some(path) = log_path() else { return };
 
+        let rendered = if keep_ansi() {
+            rendered.to_string()
+        } else {
+            strip_ansi(rendered)
+        };
+
         let event = FrameEvent {
-            rendered: strip_ansi(rendered),
+            rendered,
             jobs: jobs.iter().map(|j| JobSnapshot::from_job(j)).collect(),
         };
 

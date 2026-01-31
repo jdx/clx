@@ -159,8 +159,14 @@ Enable frame logging to capture what users see:
 CLX_TRACE_LOG=frames.jsonl cargo run --example progress
 ```
 
+To preserve ANSI escape codes in the output (useful for debugging color/styling issues):
+
+```bash
+CLX_TRACE_LOG=frames.jsonl CLX_TRACE_RAW=1 cargo run --example progress
+```
+
 Each line in the log file is a JSON object with:
-- `rendered` - The exact text displayed (ANSI codes stripped)
+- `rendered` - The exact text displayed (ANSI codes stripped by default, or raw if `CLX_TRACE_RAW` is set)
 - `jobs` - Structured array of job states (id, status, message, progress, children)
 
 Example output:
