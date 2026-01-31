@@ -23,15 +23,26 @@ use crate::osc::{ProgressState, clear_progress, set_progress};
 mod diagnostics {
     use super::*;
     use serde::Serialize;
-    use std::fs::OpenOptions;
-    use std::io::Write;
-    use std::sync::OnceLock;
+    use std::fs::{File, OpenOptions};
+    use std::io::{LineWriter, Write};
+    use std::sync::{Mutex, OnceLock};
 
-    static LOG_PATH: OnceLock<Option<String>> = OnceLock::new();
+    static LOG_WRITER: OnceLock<Option<Mutex<LineWriter<File>>>> = OnceLock::new();
     static KEEP_ANSI: OnceLock<bool> = OnceLock::new();
 
-    fn log_path() -> &'static Option<String> {
-        LOG_PATH.get_or_init(|| std::env::var("CLX_TRACE_LOG").ok())
+    fn get_log_writer() -> Option<&'static Mutex<LineWriter<File>>> {
+        LOG_WRITER
+            .get_or_init(|| {
+                std::env::var("CLX_TRACE_LOG").ok().and_then(|path| {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .ok()
+                        .map(|file| Mutex::new(LineWriter::new(file)))
+                })
+            })
+            .as_ref()
     }
 
     fn keep_ansi() -> bool {
@@ -104,34 +115,16 @@ mod diagnostics {
         pub jobs: Vec<JobSnapshot>,
     }
 
-    /// Strip ANSI escape codes from a string
-    fn strip_ansi(s: &str) -> String {
-        let mut result = String::with_capacity(s.len());
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                // Skip until 'm' (end of ANSI code)
-                while let Some(&next) = chars.peek() {
-                    chars.next();
-                    if next == 'm' {
-                        break;
-                    }
-                }
-            } else {
-                result.push(c);
-            }
-        }
-        result
-    }
-
     /// Log a frame event to the trace log file
     pub fn log_frame(rendered: &str, jobs: &[Arc<ProgressJob>]) {
-        let Some(path) = log_path() else { return };
+        let Some(log_writer) = get_log_writer() else {
+            return;
+        };
 
         let rendered = if keep_ansi() {
             rendered.to_string()
         } else {
-            strip_ansi(rendered)
+            console::strip_ansi_codes(rendered).to_string()
         };
 
         let event = FrameEvent {
@@ -140,8 +133,8 @@ mod diagnostics {
         };
 
         if let Ok(json) = serde_json::to_string(&event) {
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                let _ = writeln!(file, "{}", json);
+            if let Ok(mut writer) = log_writer.lock() {
+                let _ = writeln!(writer, "{}", json);
             }
         }
     }
