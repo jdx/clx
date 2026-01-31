@@ -235,6 +235,88 @@ Can you identify why the child jobs aren't visible?
 
 The structured `jobs` array provides machine-readable state that complements the human-readable `rendered` field, making it straightforward for LLMs to correlate what the code intended with what users actually see.
 
+### Threading Model
+
+clx's progress system is designed for safe concurrent access from multiple threads. Understanding its threading model helps when integrating with multi-threaded applications.
+
+#### How It Works
+
+1. **Background Thread**: A dedicated thread refreshes the display at regular intervals (default 200ms)
+2. **Lazy Start**: The thread only starts when the first job update occurs
+3. **Auto Stop**: The thread exits automatically when all jobs complete
+4. **Smart Refresh**: Skips terminal writes when output is unchanged
+
+#### Multi-threaded Example
+
+```rust
+use clx::progress::{ProgressJobBuilder, ProgressStatus, with_terminal_lock};
+use std::sync::Arc;
+use std::thread;
+
+let job = ProgressJobBuilder::new()
+    .prop("message", "Processing")
+    .progress_total(100)
+    .start();
+
+// Clone Arc for each worker thread
+let handles: Vec<_> = (0..4).map(|i| {
+    let job = Arc::clone(&job);
+    thread::spawn(move || {
+        for j in 0..25 {
+            job.progress_current(i * 25 + j);
+        }
+    })
+}).collect();
+
+for h in handles {
+    h.join().unwrap();
+}
+
+job.set_status(ProgressStatus::Done);
+```
+
+#### Synchronizing with Logging
+
+Use `with_terminal_lock()` to prevent your output from being overwritten by progress updates:
+
+```rust
+use clx::progress::with_terminal_lock;
+
+// Safe to write without interference from progress display
+with_terminal_lock(|| {
+    eprintln!("Log message");
+});
+```
+
+Or use the `println()` method on a job, which handles the locking automatically:
+
+```rust
+job.println("Found 42 files to process");
+```
+
+#### Text Mode for CI/Pipes
+
+When stdout/stderr isn't a terminal, use text mode to disable cursor manipulation:
+
+```rust
+use clx::progress::{set_output, ProgressOutput};
+
+if std::env::var("CI").is_ok() || !console::user_attended_stderr() {
+    set_output(ProgressOutput::Text);
+}
+```
+
+#### Controlling the Refresh Loop
+
+| Function | Effect |
+|----------|--------|
+| `pause()` | Clear display and stop refreshing |
+| `resume()` | Restore display and resume refreshing |
+| `stop()` | Stop loop and render final state |
+| `stop_clear()` | Stop loop and clear display |
+| `set_interval(d)` | Change refresh interval |
+| `flush()` | Force immediate refresh |
+
 ## API Overview
 
 ### `clx::progress`
