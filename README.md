@@ -86,10 +86,17 @@ Available template functions:
   - Emoji: `globe`, `moon`, `monkey`, `runner`, `oranges`, `smiley`
 - `progress_bar(flex=true)` - Progress bar that fills available width
 - `progress_bar(width=N)` - Fixed-width progress bar
+- `elapsed()` - Time since job started (e.g., "1m23s")
+- `eta()` - Estimated time remaining based on progress
+- `rate()` - Throughput rate (e.g., "42.5/s")
 
 Available template filters:
 - `{{ content | flex }}` - Truncates content to fit available width
 - `{{ content | flex_fill }}` - Pads content with spaces to fill available width (for right-aligning subsequent content)
+- Color filters: `{{ text | cyan }}`, `{{ text | blue }}`, `{{ text | green }}`, `{{ text | yellow }}`, `{{ text | red }}`, `{{ text | magenta }}`
+- Style filters: `{{ text | bold }}`, `{{ text | dim }}`, `{{ text | underline }}`
+
+Tera's built-in `{% if %}` conditionals are also available for conditional rendering.
 
 #### Right-Aligned Progress Bars
 

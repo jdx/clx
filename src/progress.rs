@@ -360,6 +360,7 @@ impl ProgressJobBuilder {
             tera_ctx: Mutex::new(self.ctx),
             progress_current: Mutex::new(self.progress_current),
             progress_total: Mutex::new(self.progress_total),
+            start: Instant::now(),
         }
     }
 
@@ -411,6 +412,7 @@ pub struct ProgressJob {
     on_done: ProgressJobDoneBehavior,
     progress_current: Mutex<Option<usize>>,
     progress_total: Mutex<Option<usize>>,
+    start: Instant,
 }
 
 impl ProgressJob {
@@ -511,6 +513,8 @@ impl ProgressJob {
     pub fn prop<T: SerializeTrait + ?Sized, S: Into<String>>(&self, key: S, val: &T) {
         let mut ctx = self.tera_ctx.lock().unwrap();
         ctx.insert(key, val);
+        drop(ctx);
+        self.update();
     }
 
     pub fn progress_current(&self, mut current: usize) {
@@ -734,6 +738,9 @@ fn start() {
     });
 }
 
+// Cache for smart refresh - skip terminal writes when output is unchanged and no spinners animating
+static LAST_OUTPUT: Mutex<String> = Mutex::new(String::new());
+
 fn refresh() -> Result<bool> {
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
     if STOPPING.load(Ordering::Relaxed) {
@@ -769,6 +776,29 @@ fn refresh() -> Result<bool> {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
+
+    // Process any remaining flex tags
+    let final_output = if output.contains("<clx:flex>") || output.contains("<clx:flex_fill>") {
+        flex(&output, term.width() as usize)
+    } else {
+        output
+    };
+
+    // Smart refresh: skip terminal write if output unchanged and no spinners animating
+    // (running jobs have spinners that need to animate)
+    let mut last_output = LAST_OUTPUT.lock().unwrap();
+    if !any_running && final_output == *last_output && *lines > 0 {
+        // Output unchanged and no animations - skip expensive terminal operations
+        drop(last_output);
+        if !any_running && !any_running_check() {
+            *STARTED.lock().unwrap() = false;
+            return Ok(false);
+        }
+        return Ok(true);
+    }
+    *last_output = final_output.clone();
+    drop(last_output);
+
     // Perform clear + write + line accounting atomically to avoid interleaving with logger/pause
     let _guard = TERM_LOCK.lock().unwrap();
     // Robustly clear the previously rendered frame
@@ -777,14 +807,7 @@ fn refresh() -> Result<bool> {
         term.move_cursor_left(term.width() as usize)?;
         term.clear_to_end_of_screen()?;
     }
-    if !output.is_empty() {
-        // Process any remaining flex tags
-        let final_output = if output.contains("<clx:flex>") {
-            flex(&output, term.width() as usize)
-        } else {
-            output
-        };
-
+    if !final_output.is_empty() {
         // Log frame for diagnostics (when CLX_TRACE_LOG is set)
         diagnostics::log_frame(&final_output, &jobs);
 
@@ -1056,11 +1079,73 @@ fn clear() -> Result<()> {
     Ok(())
 }
 
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m{}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
 fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     let elapsed = ctx.elapsed().as_millis() as usize;
+    let job_elapsed = job.start.elapsed();
+    let job_elapsed_secs = job_elapsed.as_secs_f64();
     let status = job.status.lock().unwrap().clone();
     let progress = ctx.progress;
     let width = ctx.width;
+
+    // elapsed() - time since job started, formatted as "1m23s"
+    let elapsed_str = format_duration(job_elapsed);
+    tera.register_function("elapsed", move |_: &HashMap<String, tera::Value>| {
+        Ok(elapsed_str.clone().into())
+    });
+
+    // eta() - estimated time remaining based on progress
+    let eta_str = if let Some((cur, total)) = progress {
+        if cur > 0 && total > 0 && cur <= total {
+            let progress_ratio = cur as f64 / total as f64;
+            let estimated_total = job_elapsed_secs / progress_ratio;
+            let remaining = estimated_total - job_elapsed_secs;
+            if remaining > 0.0 {
+                format_duration(Duration::from_secs_f64(remaining))
+            } else {
+                "0s".to_string()
+            }
+        } else {
+            "-".to_string()
+        }
+    } else {
+        "-".to_string()
+    };
+    tera.register_function("eta", move |_: &HashMap<String, tera::Value>| {
+        Ok(eta_str.clone().into())
+    });
+
+    // rate() - items per second (or per minute if slow)
+    let rate_str = if let Some((cur, _total)) = progress {
+        if job_elapsed_secs > 0.0 && cur > 0 {
+            let rate = cur as f64 / job_elapsed_secs;
+            if rate >= 1.0 {
+                format!("{:.1}/s", rate)
+            } else if rate >= 1.0 / 60.0 {
+                format!("{:.1}/m", rate * 60.0)
+            } else {
+                format!("{:.2}/s", rate)
+            }
+        } else {
+            "-/s".to_string()
+        }
+    } else {
+        "-/s".to_string()
+    };
+    tera.register_function("rate", move |_: &HashMap<String, tera::Value>| {
+        Ok(rate_str.clone().into())
+    });
+
     tera.register_function(
         "spinner",
         move |props: &HashMap<String, tera::Value>| match status {
@@ -1183,6 +1268,98 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
                     Ok("…".into())
                 }
             }
+        },
+    );
+
+    // Color filters
+    tera.register_filter(
+        "cyan",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::ecyan(&content).to_string().into())
+        },
+    );
+    tera.register_filter(
+        "blue",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::eblue(&content).to_string().into())
+        },
+    );
+    tera.register_filter(
+        "green",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::egreen(&content).to_string().into())
+        },
+    );
+    tera.register_filter(
+        "yellow",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::eyellow(&content).to_string().into())
+        },
+    );
+    tera.register_filter(
+        "red",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::ered(&content).to_string().into())
+        },
+    );
+    tera.register_filter(
+        "magenta",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::emagenta(&content).to_string().into())
+        },
+    );
+    tera.register_filter(
+        "bold",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::ebold(&content).to_string().into())
+        },
+    );
+    tera.register_filter(
+        "dim",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::edim(&content).to_string().into())
+        },
+    );
+    tera.register_filter(
+        "underline",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(style::eunderline(&content).to_string().into())
         },
     );
 }
