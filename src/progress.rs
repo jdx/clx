@@ -1720,6 +1720,10 @@ fn refresh() -> Result<bool> {
 }
 
 fn refresh_once() -> Result<()> {
+    // Skip rendering entirely when progress is disabled
+    if is_disabled() {
+        return Ok(());
+    }
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
     let mut tera = TERA.lock().unwrap();
     if tera.is_none() {
