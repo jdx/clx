@@ -1692,6 +1692,102 @@ fn start() {
 /// and no spinners are animating.
 static LAST_OUTPUT: Mutex<String> = Mutex::new(String::new());
 
+/// Result of rendering all jobs to a string.
+struct RenderedFrame {
+    /// Raw rendered output (before flex processing)
+    output: String,
+    /// Snapshot of jobs at render time
+    jobs: Vec<Arc<ProgressJob>>,
+}
+
+/// Prepares the Tera engine and renders all jobs to a string.
+///
+/// This function handles the common rendering logic:
+/// 1. Prepares the render context with current time
+/// 2. Initializes Tera if needed
+/// 3. Clones the current jobs
+/// 4. Updates OSC progress indicators
+/// 5. Renders all jobs using templates
+fn render_frame() -> Result<RenderedFrame> {
+    let ctx = prepare_render_context();
+    let mut tera = TERA.lock().unwrap();
+    if tera.is_none() {
+        *tera = Some(Tera::default());
+    }
+    let tera = tera.as_mut().unwrap();
+    let jobs = JOBS.lock().unwrap().clone();
+
+    update_osc_progress(&jobs);
+
+    let output = jobs
+        .iter()
+        .map(|job| job.render(tera, ctx.clone()))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(RenderedFrame { output, jobs })
+}
+
+/// Processes flex tags in the rendered output.
+///
+/// Handles both `<clx:flex>` (truncate to fit) and `<clx:flex_fill>` (pad to fill)
+/// tags based on the current terminal width.
+fn process_flex_output(output: &str) -> String {
+    if output.contains("<clx:flex>") || output.contains("<clx:flex_fill>") {
+        flex(output, term().size().1 as usize)
+    } else {
+        output.to_string()
+    }
+}
+
+/// Writes a rendered frame to the terminal.
+///
+/// This function handles:
+/// 1. Acquiring the terminal lock
+/// 2. Clearing the previous frame
+/// 3. Writing the new output
+/// 4. Logging diagnostics
+/// 5. Counting consumed rows for the next clear
+fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()> {
+    let term = term();
+    let mut lines = LINES.lock().unwrap();
+
+    let _guard = TERM_LOCK.lock().unwrap();
+
+    // Clear previous frame
+    if *lines > 0 {
+        term.move_cursor_up(*lines)?;
+        term.move_cursor_left(term.size().1 as usize)?;
+        term.clear_to_end_of_screen()?;
+    }
+
+    if !output.is_empty() {
+        diagnostics::log_frame(output, jobs);
+        term.write_line(output)?;
+
+        // Count how many terminal rows were consumed, accounting for wrapping
+        let term_width = term.size().1 as usize;
+        let mut consumed_rows = 0usize;
+        for line in output.lines() {
+            let visible_width = console::measure_text_width(line).max(1);
+            let rows = if term_width == 0 {
+                1
+            } else {
+                (visible_width - 1) / term_width + 1
+            };
+            consumed_rows += rows.max(1);
+        }
+        *lines = consumed_rows.max(1);
+    } else {
+        *lines = 0;
+    }
+
+    Ok(())
+}
+
 /// Performs one refresh cycle of the progress display.
 ///
 /// # Threading Details
@@ -1717,41 +1813,18 @@ fn refresh() -> Result<bool> {
     if is_paused() {
         return Ok(true);
     }
-    let ctx = prepare_render_context();
-    let mut tera = TERA.lock().unwrap();
-    if tera.is_none() {
-        *tera = Some(Tera::default());
-    }
-    let tera = tera.as_mut().unwrap();
-    let jobs = JOBS.lock().unwrap().clone();
 
-    // Update OSC progress based on current job progress
-    update_osc_progress(&jobs);
-
-    let any_running_check = || jobs.iter().any(|job| job.is_running());
+    let frame = render_frame()?;
+    let any_running_check = || frame.jobs.iter().any(|job| job.is_running());
     let any_running = any_running_check();
-    let term = term();
-    let mut lines = LINES.lock().unwrap();
-    let output = jobs
-        .iter()
-        .map(|job| job.render(tera, ctx.clone()))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
 
-    // Process any remaining flex tags
-    let final_output = if output.contains("<clx:flex>") || output.contains("<clx:flex_fill>") {
-        flex(&output, term.size().1 as usize)
-    } else {
-        output
-    };
+    let final_output = process_flex_output(&frame.output);
 
     // Smart refresh: skip terminal write if output unchanged and no spinners animating
     // (running jobs have spinners that need to animate)
     let mut last_output = LAST_OUTPUT.lock().unwrap();
-    if !any_running && final_output == *last_output && *lines > 0 {
+    let lines = *LINES.lock().unwrap();
+    if !any_running && final_output == *last_output && lines > 0 {
         // Output unchanged and no animations - skip expensive terminal operations
         drop(last_output);
         if !any_running && !any_running_check() {
@@ -1763,37 +1836,8 @@ fn refresh() -> Result<bool> {
     *last_output = final_output.clone();
     drop(last_output);
 
-    // Perform clear + write + line accounting atomically to avoid interleaving with logger/pause
-    let _guard = TERM_LOCK.lock().unwrap();
-    // Robustly clear the previously rendered frame
-    if *lines > 0 {
-        term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term.size().1 as usize)?;
-        term.clear_to_end_of_screen()?;
-    }
-    if !final_output.is_empty() {
-        // Log frame for diagnostics (when CLX_TRACE_LOG is set)
-        diagnostics::log_frame(&final_output, &jobs);
+    write_frame(&final_output, &frame.jobs)?;
 
-        term.write_line(&final_output)?;
-
-        // Count how many terminal rows were consumed, accounting for wrapping
-        let term_width = term.size().1 as usize;
-        let mut consumed_rows = 0usize;
-        for line in final_output.lines() {
-            let visible_width = console::measure_text_width(line).max(1);
-            let rows = if term_width == 0 {
-                1
-            } else {
-                (visible_width - 1) / term_width + 1
-            };
-            consumed_rows += rows.max(1);
-        }
-        *lines = consumed_rows.max(1);
-    } else {
-        *lines = 0;
-    }
-    drop(_guard);
     if !any_running && !any_running_check() {
         *STARTED.lock().unwrap() = false;
         return Ok(false); // stop looping if no active progress jobs are running before or after the refresh
@@ -1807,60 +1851,11 @@ fn refresh_once() -> Result<()> {
         return Ok(());
     }
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
-    let mut tera = TERA.lock().unwrap();
-    if tera.is_none() {
-        *tera = Some(Tera::default());
-    }
-    let tera = tera.as_mut().unwrap();
-    let ctx = prepare_render_context();
-    let jobs = JOBS.lock().unwrap().clone();
 
-    // Update OSC progress based on current job progress
-    update_osc_progress(&jobs);
+    let frame = render_frame()?;
+    let final_output = process_flex_output(&frame.output);
+    write_frame(&final_output, &frame.jobs)?;
 
-    let term = term();
-    let mut lines = LINES.lock().unwrap();
-    let output = jobs
-        .iter()
-        .map(|job| job.render(tera, ctx.clone()))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let _guard = TERM_LOCK.lock().unwrap();
-    if *lines > 0 {
-        term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term.size().1 as usize)?;
-        term.clear_to_end_of_screen()?;
-    }
-    if !output.is_empty() {
-        let final_output = if output.contains("<clx:flex>") {
-            flex(&output, term.size().1 as usize)
-        } else {
-            output
-        };
-
-        // Log frame for diagnostics
-        diagnostics::log_frame(&final_output, &jobs);
-
-        term.write_line(&final_output)?;
-        let term_width = term.size().1 as usize;
-        let mut consumed_rows = 0usize;
-        for line in final_output.lines() {
-            let visible_width = console::measure_text_width(line).max(1);
-            let rows = if term_width == 0 {
-                1
-            } else {
-                (visible_width - 1) / term_width + 1
-            };
-            consumed_rows += rows.max(1);
-        }
-        *lines = consumed_rows.max(1);
-    } else {
-        *lines = 0;
-    }
-    drop(_guard);
     Ok(())
 }
 
