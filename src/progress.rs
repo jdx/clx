@@ -1,5 +1,5 @@
 use crate::{Result, progress_bar, style};
-use serde::ser::Serialize;
+use serde::ser::Serialize as SerializeTrait;
 use std::{
     collections::HashMap,
     fmt,
@@ -15,26 +15,125 @@ use std::{
 use console::Term;
 use indicatif::TermLike;
 use tera::{Context, Tera};
-use tracing::{debug, trace};
 
 // Include OSC progress functionality
 use crate::osc::{ProgressState, clear_progress, set_progress};
 
-/// OSC progress tracing helper macros
-macro_rules! osc_trace {
-    ($($arg:tt)*) => {{
-        if std::env::var("CLX_TRACE_OSC").as_ref().map(|s| s == "1").unwrap_or(false) {
-            tracing::trace!(target: "clx::osc", $($arg)*);
-        }
-    }};
-}
+// Diagnostic frame logging
+mod diagnostics {
+    use super::*;
+    use serde::Serialize;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::sync::OnceLock;
 
-macro_rules! osc_debug {
-    ($($arg:tt)*) => {{
-        if std::env::var("CLX_TRACE_OSC").as_ref().map(|s| s == "1").unwrap_or(false) {
-            tracing::debug!(target: "clx::osc", $($arg)*);
+    static LOG_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+    fn log_path() -> &'static Option<String> {
+        LOG_PATH.get_or_init(|| std::env::var("CLX_TRACE_LOG").ok())
+    }
+
+    /// Snapshot of a single job's state
+    #[derive(Debug, Clone, Serialize)]
+    pub struct JobSnapshot {
+        pub id: usize,
+        pub status: String,
+        pub message: Option<String>,
+        pub progress: Option<(usize, usize)>,
+        pub children: Vec<JobSnapshot>,
+    }
+
+    impl JobSnapshot {
+        pub fn from_job(job: &ProgressJob) -> Self {
+            let status = job.status.lock().unwrap();
+            let status_str = match &*status {
+                ProgressStatus::Hide => "hide",
+                ProgressStatus::Pending => "pending",
+                ProgressStatus::Running => "running",
+                ProgressStatus::RunningCustom(_) => "running",
+                ProgressStatus::DoneCustom(_) => "done",
+                ProgressStatus::Done => "done",
+                ProgressStatus::Warn => "warn",
+                ProgressStatus::Failed => "failed",
+            };
+            drop(status);
+
+            let message = job
+                .tera_ctx
+                .lock()
+                .unwrap()
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let progress = match (
+                *job.progress_current.lock().unwrap(),
+                *job.progress_total.lock().unwrap(),
+            ) {
+                (Some(cur), Some(total)) => Some((cur, total)),
+                _ => None,
+            };
+
+            let children = job
+                .children
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| JobSnapshot::from_job(c))
+                .collect();
+
+            JobSnapshot {
+                id: job.id,
+                status: status_str.to_string(),
+                message,
+                progress,
+                children,
+            }
         }
-    }};
+    }
+
+    /// Frame event emitted for each refresh
+    #[derive(Debug, Clone, Serialize)]
+    pub struct FrameEvent {
+        pub rendered: String,
+        pub jobs: Vec<JobSnapshot>,
+    }
+
+    /// Strip ANSI escape codes from a string
+    fn strip_ansi(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Skip until 'm' (end of ANSI code)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    /// Log a frame event to the trace log file
+    pub fn log_frame(rendered: &str, jobs: &[Arc<ProgressJob>]) {
+        let Some(path) = log_path() else { return };
+
+        let event = FrameEvent {
+            rendered: strip_ansi(rendered),
+            jobs: jobs.iter().map(|j| JobSnapshot::from_job(j)).collect(),
+        };
+
+        if let Ok(json) = serde_json::to_string(&event) {
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(file, "{}", json);
+            }
+        }
+    }
 }
 
 static DEFAULT_BODY: LazyLock<String> =
@@ -79,13 +178,18 @@ static SPINNERS: LazyLock<HashMap<String, Spinner>> = LazyLock::new(|| {
     .collect()
 });
 
-static INTERVAL: Mutex<Duration> = Mutex::new(Duration::from_millis(200)); // TODO: use fps from a spinner
+/// Refresh interval for the progress display.
+/// Set to 200ms to match the fastest spinner frame rate (mini_dot, line, etc.).
+/// Spinners define their frame interval in milliseconds (e.g., 200 = change frame every 200ms).
+/// Using the minimum ensures smooth animation for all spinners.
+static INTERVAL: Mutex<Duration> = Mutex::new(Duration::from_millis(200));
 static LINES: Mutex<usize> = Mutex::new(0);
 static TERM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Execute the provided function while holding the global terminal lock.
 /// This allows external crates to synchronize stderr writes (e.g., logging)
 /// with clx's progress clear/write operations to avoid interleaved output.
+#[must_use]
 pub fn with_terminal_lock<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
@@ -139,6 +243,7 @@ impl RenderContext {
     }
 }
 
+#[must_use]
 pub struct ProgressJobBuilder {
     body: String,
     body_text: Option<String>,
@@ -152,6 +257,19 @@ pub struct ProgressJobBuilder {
 impl Default for ProgressJobBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Debug for ProgressJobBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProgressJobBuilder")
+            .field("body", &self.body)
+            .field("body_text", &self.body_text)
+            .field("status", &self.status)
+            .field("on_done", &self.on_done)
+            .field("progress_current", &self.progress_current)
+            .field("progress_total", &self.progress_total)
+            .finish_non_exhaustive()
     }
 }
 
@@ -190,21 +308,20 @@ impl ProgressJobBuilder {
 
     pub fn progress_current(mut self, progress_current: usize) -> Self {
         self.progress_current = Some(progress_current);
-        trace!(progress_current = progress_current, "progress_current");
         self.prop("cur", &progress_current)
     }
 
     pub fn progress_total(mut self, progress_total: usize) -> Self {
         self.progress_total = Some(progress_total);
-        trace!(progress_total = progress_total, "progress_total");
         self.prop("total", &progress_total)
     }
 
-    pub fn prop<T: Serialize + ?Sized, S: Into<String>>(mut self, key: S, val: &T) -> Self {
+    pub fn prop<T: SerializeTrait + ?Sized, S: Into<String>>(mut self, key: S, val: &T) -> Self {
         self.ctx.insert(key, val);
         self
     }
 
+    #[must_use = "the returned ProgressJob should be used or stored"]
     pub fn build(self) -> ProgressJob {
         static ID: AtomicUsize = AtomicUsize::new(0);
         ProgressJob {
@@ -221,6 +338,7 @@ impl ProgressJobBuilder {
         }
     }
 
+    #[must_use = "the returned job handle is needed to control the job"]
     pub fn start(self) -> Arc<ProgressJob> {
         crate::init();
         let job = Arc::new(self.build());
@@ -296,31 +414,8 @@ impl ProgressJob {
         let name = format!("progress_{}", self.id);
         add_tera_template(tera, &name, &body)?;
         let rendered_body = tera.render(&name, &ctx.tera_ctx)?;
-        trace!(
-            template_name = %name,
-            rendered_len = rendered_body.len(),
-            width = ctx.width,
-            indent = ctx.indent,
-            "progress: rendered template"
-        );
-        if rendered_body.len() > 100 {
-            trace!(preview = ?&rendered_body[..100], "progress: rendered preview");
-        }
         let flex_width = ctx.width.saturating_sub(ctx.indent);
         let body = flex(&rendered_body, flex_width);
-        trace!(
-            flexed_len = body.len(),
-            flex_width = flex_width,
-            "progress: after flex"
-        );
-        // Safety check: if flex tags still exist, log a warning
-        if body.contains("<clx:flex>") {
-            debug!(
-                job_id = self.id,
-                body_preview = ?&body[..body.len().min(200)],
-                "progress: flex tags remain after processing!"
-            );
-        }
         s.push(body.trim_end().to_string());
         if ctx.include_children && self.should_display_children() {
             ctx.indent += 1;
@@ -365,6 +460,7 @@ impl ProgressJob {
         }
     }
 
+    #[must_use]
     pub fn children(&self) -> Vec<Arc<Self>> {
         self.children.lock().unwrap().clone()
     }
@@ -387,13 +483,12 @@ impl ProgressJob {
         }
     }
 
-    pub fn prop<T: Serialize + ?Sized, S: Into<String>>(&self, key: S, val: &T) {
+    pub fn prop<T: SerializeTrait + ?Sized, S: Into<String>>(&self, key: S, val: &T) {
         let mut ctx = self.tera_ctx.lock().unwrap();
         ctx.insert(key, val);
     }
 
     pub fn progress_current(&self, mut current: usize) {
-        trace!(progress_current = current, "progress_current");
         self.prop("cur", &current);
         if let Some(total) = *self.progress_total.lock().unwrap() {
             current = current.min(total);
@@ -403,7 +498,6 @@ impl ProgressJob {
     }
 
     pub fn progress_total(&self, mut total: usize) {
-        trace!(progress_total = total, "progress_total");
         if let Some(current) = *self.progress_current.lock().unwrap() {
             total = total.max(current);
         }
@@ -652,41 +746,30 @@ fn refresh() -> Result<bool> {
         .join("\n");
     // Perform clear + write + line accounting atomically to avoid interleaving with logger/pause
     let _guard = TERM_LOCK.lock().unwrap();
-    // Robustly clear the previously rendered frame. Using move_cursor_up + clear_to_end_of_screen
-    // avoids issues with terminals that wrap long lines differently.
+    // Robustly clear the previously rendered frame
     if *lines > 0 {
-        trace!(prev_lines = *lines, "progress: clearing previous frame");
-        // Clear wrapped rows explicitly to handle terminal wrapping correctly
         term.move_cursor_up(*lines)?;
         term.move_cursor_left(term.width() as usize)?;
         term.clear_to_end_of_screen()?;
     }
     if !output.is_empty() {
-        // Safety check: ensure no flex tags are visible in final output
+        // Process any remaining flex tags
         let final_output = if output.contains("<clx:flex>") {
-            // Process any remaining flex tags with terminal width
             flex(&output, term.width() as usize)
         } else {
             output
         };
-        if final_output.contains("<clx:flex>") {
-            trace!(
-                final_output = final_output,
-                "progress: flex tags should not be visible in final output"
-            );
-        }
-        // Log a brief frame summary for diagnostics
-        let newlines = final_output.lines().count();
-        let first_line = final_output.lines().next().unwrap_or("");
-        trace!(lines=newlines, chars=final_output.len(), first_line=?first_line, "progress: frame summary");
+
+        // Log frame for diagnostics (when CLX_TRACE_LOG is set)
+        diagnostics::log_frame(&final_output, &jobs);
+
         term.write_line(&final_output)?;
-        // Count how many terminal rows were actually consumed, accounting for wrapping
+
+        // Count how many terminal rows were consumed, accounting for wrapping
         let term_width = term.width() as usize;
         let mut consumed_rows = 0usize;
         for line in final_output.lines() {
-            // Measure visible width (ANSI-safe)
             let visible_width = console::measure_text_width(line).max(1);
-            // Number of rows this line occupies when wrapped on the terminal
             let rows = if term_width == 0 {
                 1
             } else {
@@ -694,13 +777,7 @@ fn refresh() -> Result<bool> {
             };
             consumed_rows += rows.max(1);
         }
-        trace!(
-            consumed_rows = consumed_rows,
-            term_width = term_width,
-            "progress: computed consumed rows"
-        );
         *lines = consumed_rows.max(1);
-        trace!(stored_lines = *lines, "progress: after write state");
     } else {
         *lines = 0;
     }
@@ -750,12 +827,10 @@ fn refresh_once() -> Result<()> {
         } else {
             output
         };
-        if final_output.contains("<clx:flex>") {
-            trace!(
-                final_output = final_output,
-                "progress: flex tags should not be visible in final output"
-            );
-        }
+
+        // Log frame for diagnostics
+        diagnostics::log_frame(&final_output, &jobs);
+
         term.write_line(&final_output)?;
         let term_width = term.width() as usize;
         let mut consumed_rows = 0usize;
@@ -781,6 +856,7 @@ fn term() -> &'static Term {
     &TERM
 }
 
+#[must_use]
 pub fn interval() -> Duration {
     *INTERVAL.lock().unwrap()
 }
@@ -828,23 +904,11 @@ pub fn stop_clear() {
 
 /// Updates OSC progress based on the current progress of all jobs
 fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
-    osc_debug!(
-        "update_osc_progress called with {} top-level jobs",
-        jobs.len()
-    );
-
-    if !crate::osc::is_enabled() {
-        osc_debug!("OSC progress is disabled, skipping update");
+    if !crate::osc::is_enabled() || jobs.is_empty() {
         return;
     }
 
-    if jobs.is_empty() {
-        osc_debug!("No jobs provided, skipping OSC update");
-        return;
-    }
-
-    // If the first top-level job has explicit progress, use that directly.
-    // This ensures OSC progress matches what's displayed in the header bar (cur/total).
+    // If the first top-level job has explicit progress, use that directly
     if let (Some(current), Some(total)) = (
         *jobs[0].progress_current.lock().unwrap(),
         *jobs[0].progress_total.lock().unwrap(),
@@ -872,19 +936,12 @@ fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
             };
 
             let osc_state = if has_failed_jobs {
-                osc_debug!("Jobs failed, using OSC Error state");
                 ProgressState::Error
             } else {
                 ProgressState::Normal
             };
 
             if *last_pct != Some(overall_percentage) || (has_failed_jobs && last_pct.is_none()) {
-                osc_debug!(
-                    "Sending OSC update from explicit progress: {}% ({}/{})",
-                    overall_percentage,
-                    current,
-                    total
-                );
                 set_progress(osc_state, overall_percentage);
                 *last_pct = Some(overall_percentage);
             }
@@ -896,17 +953,9 @@ fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
     let mut all_jobs: Vec<Arc<ProgressJob>> = Vec::new();
     let mut stack: Vec<Arc<ProgressJob>> = jobs.to_vec();
 
-    osc_debug!(
-        "Starting job collection with {} jobs in initial stack",
-        stack.len()
-    );
-
     while let Some(job) = stack.pop() {
         all_jobs.push(job.clone());
-        // Add children to stack to process them too
         let children = job.children.lock().unwrap();
-        let child_count = children.len();
-        osc_trace!("Processing job with {} children", child_count);
         for child in children.iter() {
             stack.push(child.clone());
         }
@@ -914,14 +963,9 @@ fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
 
     let mut total_progress = 0.0f64;
     let mut job_count = 0;
-    let mut explicit_progress_count = 0;
-    let mut implicit_progress_count = 0;
     let mut has_failed_jobs = false;
 
-    osc_debug!("Collected {} total jobs including children", all_jobs.len());
-
-    for (idx, job) in all_jobs.iter().enumerate() {
-        // For jobs with explicit progress (current/total), use that
+    for job in all_jobs.iter() {
         if let (Some(current), Some(total)) = (
             *job.progress_current.lock().unwrap(),
             *job.progress_total.lock().unwrap(),
@@ -930,99 +974,46 @@ fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
                 let progress = (current as f64 / total as f64).clamp(0.0, 1.0);
                 total_progress += progress;
                 job_count += 1;
-                explicit_progress_count += 1;
-                osc_trace!(
-                    job_idx = idx,
-                    job_type = "explicit",
-                    current = current,
-                    total = total,
-                    progress = progress,
-                    "OSC progress contribution"
-                );
-            } else {
-                osc_debug!("Job {} has total=0, skipping", idx);
             }
         } else {
-            // For jobs without explicit progress (like indeterminate):
-            // - If job is running: treat as in-progress (50%)
-            // - If job is done/success: treat as complete (100%)
-            // - If job is failed/error: treat as complete but might not count as "progress"
             let status = job.status.lock().unwrap();
             let progress = match &*status {
-                // Running jobs are in progress
                 s if s.is_running() => 0.5,
-                // Completed jobs are done
                 s if s.is_done() => 1.0,
-                // Failed jobs are done but mark as error state
                 s if s.is_failed() => {
                     has_failed_jobs = true;
                     1.0
                 }
-                // Other states
                 _ => 1.0,
             };
             total_progress += progress;
             job_count += 1;
-            implicit_progress_count += 1;
-            osc_trace!(job_idx = idx, job_type = "implicit", status = ?status, progress = progress, "OSC progress contribution");
         }
     }
-
-    osc_debug!(
-        "Progress calculation: {} jobs ({} explicit, {} implicit), total progress: {:.3}, has_failed: {}",
-        job_count,
-        explicit_progress_count,
-        implicit_progress_count,
-        total_progress,
-        has_failed_jobs
-    );
 
     if job_count > 0 {
         let overall_percentage =
             (total_progress / job_count as f64 * 100.0).clamp(0.0, 100.0) as u8;
         let mut last_pct = LAST_OSC_PERCENTAGE.lock().unwrap();
 
-        // Choose OSC state based on whether any jobs failed
         let osc_state = if has_failed_jobs {
-            osc_debug!("Jobs failed, using OSC Error state");
             ProgressState::Error
         } else {
             ProgressState::Normal
         };
 
-        // Only send OSC update if percentage has changed or state has changed
         if *last_pct != Some(overall_percentage) || (has_failed_jobs && last_pct.is_none()) {
-            osc_debug!(
-                "Sending OSC update: {}% ({} jobs, {:.3} total progress, state: {:?})",
-                overall_percentage,
-                job_count,
-                total_progress,
-                osc_state
-            );
             set_progress(osc_state, overall_percentage);
             *last_pct = Some(overall_percentage);
-        } else {
-            osc_debug!(
-                "OSC unchanged: {}% ({} jobs, {:.3} total progress, state: {:?})",
-                overall_percentage,
-                job_count,
-                total_progress,
-                osc_state
-            );
         }
-    } else {
-        osc_debug!("No jobs to update OSC progress");
     }
 }
 
 /// Clear OSC progress indicator
 fn clear_osc_progress() {
     if crate::osc::is_enabled() {
-        osc_debug!("Clearing OSC progress");
         clear_progress();
         *LAST_OSC_PERCENTAGE.lock().unwrap() = None;
-    } else {
-        osc_debug!("OSC progress disabled, not clearing");
     }
 }
 
@@ -1121,6 +1112,18 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
         },
     );
 
+    // Flex fill filter - pads content to fill available width (for right-aligning subsequent content)
+    tera.register_filter(
+        "flex_fill",
+        |value: &tera::Value, _: &HashMap<String, tera::Value>| {
+            let content = value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| value.to_string());
+            Ok(format!("<clx:flex_fill>{}<clx:flex_fill>", content).into())
+        },
+    );
+
     // Simple truncate filter for text mode
     tera.register_filter(
         "truncate_text",
@@ -1178,28 +1181,22 @@ pub fn set_output(output: ProgressOutput) {
     *OUTPUT.lock().unwrap() = output;
 }
 
+#[must_use]
 pub fn output() -> ProgressOutput {
     *OUTPUT.lock().unwrap()
 }
 
 fn flex(s: &str, width: usize) -> String {
     // Fast path: no tags
-    if !s.contains("<clx:flex>") {
-        trace!(chars = s.len(), "flex: no flex tags");
+    if !s.contains("<clx:flex>") && !s.contains("<clx:flex_fill>") {
         return s.to_string();
-    }
-
-    debug!(chars = s.len(), width = width, "flex: processing");
-    if s.len() > 100 {
-        let preview = safe_prefix(s, 100);
-        trace!(first_100_chars = ?preview, "flex: long content preview");
     }
 
     // Process repeatedly until no tags remain or no progress can be made
     let mut current = s.to_string();
     let max_passes = 8; // avoid pathological loops
     for _ in 0..max_passes {
-        if !current.contains("<clx:flex>") {
+        if !current.contains("<clx:flex>") && !current.contains("<clx:flex_fill>") {
             break;
         }
 
@@ -1207,7 +1204,6 @@ fn flex(s: &str, width: usize) -> String {
         current = flex_process_once(&before, width);
 
         if current == before {
-            // No progress; bail out
             break;
         }
     }
@@ -1215,23 +1211,49 @@ fn flex(s: &str, width: usize) -> String {
 }
 
 fn flex_process_once(s: &str, width: usize) -> String {
-    // Check if we have flex tags that might span multiple lines
-    let flex_count = s.matches("<clx:flex>").count();
-    trace!(flex_count = flex_count, "flex: tag count");
-    if flex_count >= 2 {
-        // We have a complete flex tag pair, process as a single unit
-        let parts = s.splitn(3, "<clx:flex>").collect::<Vec<_>>();
-        trace!(parts_count = parts.len(), "flex: split parts");
+    // Check for flex_fill tags first (pads content to fill available width)
+    let flex_fill_count = s.matches("<clx:flex_fill>").count();
+    if flex_fill_count >= 2 {
+        let parts = s.splitn(3, "<clx:flex_fill>").collect::<Vec<_>>();
         if parts.len() >= 2 {
             let prefix = parts[0];
             let content = parts[1];
             let suffix = if parts.len() == 3 { parts[2] } else { "" };
-            trace!(
-                prefix = ?prefix,
-                content_len = content.len(),
-                suffix = ?suffix,
-                "flex: parts breakdown"
-            );
+
+            let prefix_width = console::measure_text_width(prefix);
+            let suffix_width = console::measure_text_width(suffix);
+            let content_width = console::measure_text_width(content);
+            let available_for_content = width.saturating_sub(prefix_width + suffix_width);
+
+            let mut result = String::new();
+            result.push_str(prefix);
+
+            if content_width >= available_for_content {
+                // Truncate if content is too long
+                if available_for_content > 3 {
+                    result.push_str(&console::truncate_str(content, available_for_content, "…"));
+                } else {
+                    result.push_str(content);
+                }
+            } else {
+                // Pad with spaces to fill available width
+                result.push_str(content);
+                let padding = available_for_content.saturating_sub(content_width);
+                result.push_str(&" ".repeat(padding));
+            }
+            result.push_str(suffix);
+            return result;
+        }
+    }
+
+    // Check for regular flex tags (truncates content to fit)
+    let flex_count = s.matches("<clx:flex>").count();
+    if flex_count >= 2 {
+        let parts = s.splitn(3, "<clx:flex>").collect::<Vec<_>>();
+        if parts.len() >= 2 {
+            let prefix = parts[0];
+            let content = parts[1];
+            let suffix = if parts.len() == 3 { parts[2] } else { "" };
 
             // Handle empty content case
             if content.is_empty() {
@@ -1247,9 +1269,6 @@ fn flex_process_once(s: &str, width: usize) -> String {
             let suffix_lines: Vec<&str> = suffix.lines().collect();
 
             // Calculate the width available on the first line
-            // If the flex segment begins at the start of a new line, treat prefix width as 0.
-            // Rust's str::lines() drops a trailing empty line for a trailing '\n', so explicitly
-            // check the raw prefix for a trailing newline to detect this case.
             let first_line_prefix = prefix_lines.last().unwrap_or(&"");
             let first_line_prefix_width = if prefix.ends_with('\n') {
                 0
@@ -1259,7 +1278,7 @@ fn flex_process_once(s: &str, width: usize) -> String {
 
             // For multi-line content, truncate more aggressively
             if content_lines.len() > 1 {
-                let available_width = width.saturating_sub(first_line_prefix_width + 3); // ellipsis
+                let available_width = width.saturating_sub(first_line_prefix_width + 3);
 
                 let mut result = String::new();
                 result.push_str(prefix);
@@ -1276,10 +1295,9 @@ fn flex_process_once(s: &str, width: usize) -> String {
                     result.push_str(content);
                 }
 
-                // Intentionally omit suffix for multi-line
                 return result;
             } else {
-                // Single line with flex tags, process normally
+                // Single line with flex tags
                 let suffix_width = if suffix_lines.is_empty() {
                     0
                 } else {
@@ -1288,7 +1306,6 @@ fn flex_process_once(s: &str, width: usize) -> String {
                 let available_for_content =
                     width.saturating_sub(first_line_prefix_width + suffix_width);
 
-                // If prefix alone exceeds width, truncate everything to fit
                 if first_line_prefix_width >= width {
                     return console::truncate_str(prefix, width, "…").to_string();
                 }
@@ -1300,7 +1317,6 @@ fn flex_process_once(s: &str, width: usize) -> String {
                     // Render a progress bar sized to the available space
                     let mut cur: Option<usize> = None;
                     let mut total: Option<usize> = None;
-                    // very small parser for attributes
                     for part in content.trim_matches(['<', '>', ' ']).split_whitespace() {
                         if let Some(v) = part.strip_prefix("cur=") {
                             cur = v.parse::<usize>().ok();
@@ -1334,6 +1350,42 @@ fn flex_process_once(s: &str, width: usize) -> String {
     // Fallback: process line by line for incomplete flex tags
     s.lines()
         .map(|line| {
+            // Handle flex_fill in line-by-line mode
+            if line.contains("<clx:flex_fill>") {
+                let parts = line.splitn(3, "<clx:flex_fill>").collect::<Vec<_>>();
+                if parts.len() >= 2 {
+                    let prefix = parts[0];
+                    let content = parts[1];
+                    let suffix = if parts.len() == 3 { parts[2] } else { "" };
+
+                    let prefix_width = console::measure_text_width(prefix);
+                    let suffix_width = console::measure_text_width(suffix);
+                    let content_width = console::measure_text_width(content);
+                    let available_for_content = width.saturating_sub(prefix_width + suffix_width);
+
+                    let mut result = String::new();
+                    result.push_str(prefix);
+
+                    if content_width >= available_for_content {
+                        if available_for_content > 3 {
+                            result.push_str(&console::truncate_str(
+                                content,
+                                available_for_content,
+                                "…",
+                            ));
+                        } else {
+                            result.push_str(content);
+                        }
+                    } else {
+                        result.push_str(content);
+                        let padding = available_for_content.saturating_sub(content_width);
+                        result.push_str(&" ".repeat(padding));
+                    }
+                    result.push_str(suffix);
+                    return result;
+                }
+            }
+
             if !line.contains("<clx:flex>") {
                 return line.to_string();
             }
@@ -1485,5 +1537,234 @@ mod tests {
         let width = console::measure_text_width(&result);
         assert_eq!(width, target_width);
         assert!(!result.contains("<clx:progress"));
+    }
+
+    #[test]
+    fn test_flex_fill() {
+        // Test that flex_fill pads content to fill available width
+        let s = "prefix<clx:flex_fill>short<clx:flex_fill>suffix";
+        let result = flex(s, 30);
+        let width = console::measure_text_width(&result);
+        // Should be exactly 30 (filled with spaces)
+        assert_eq!(width, 30);
+        assert!(result.starts_with("prefix"));
+        assert!(result.ends_with("suffix"));
+        assert!(result.contains("short"));
+        // Should have padding spaces between content and suffix
+        assert!(result.contains("     ")); // multiple spaces
+
+        // Test flex_fill with long content (should truncate)
+        let s = "pre<clx:flex_fill>this is very long content that needs truncation<clx:flex_fill>end";
+        let result = flex(s, 20);
+        let width = console::measure_text_width(&result);
+        assert!(width <= 20);
+        assert!(result.starts_with("pre"));
+    }
+
+    #[test]
+    fn test_flex_fill_right_align() {
+        // Test that flex_fill can be used to right-align suffix content
+        let s = "X<clx:flex_fill>msg<clx:flex_fill>[====]";
+        let result = flex(s, 20);
+        // Result should be: "Xmsg          [====]" (padded to push [====] right)
+        assert_eq!(console::measure_text_width(&result), 20);
+        assert!(result.starts_with("Xmsg"));
+        assert!(result.ends_with("[====]"));
+    }
+
+    #[test]
+    fn test_progress_job_builder_default() {
+        let builder = ProgressJobBuilder::new();
+        let job = builder.build();
+        assert_eq!(*job.status.lock().unwrap(), ProgressStatus::Running);
+        assert!(job.progress_current.lock().unwrap().is_none());
+        assert!(job.progress_total.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_progress_job_builder_with_props() {
+        let job = ProgressJobBuilder::new()
+            .prop("message", "test message")
+            .status(ProgressStatus::Pending)
+            .progress_current(5)
+            .progress_total(10)
+            .on_done(ProgressJobDoneBehavior::Hide)
+            .build();
+
+        assert_eq!(*job.status.lock().unwrap(), ProgressStatus::Pending);
+        assert_eq!(*job.progress_current.lock().unwrap(), Some(5));
+        assert_eq!(*job.progress_total.lock().unwrap(), Some(10));
+        assert_eq!(job.on_done, ProgressJobDoneBehavior::Hide);
+    }
+
+    #[test]
+    fn test_progress_job_builder_body() {
+        let job = ProgressJobBuilder::new()
+            .body("custom template {{ message }}")
+            .build();
+
+        assert_eq!(*job.body.lock().unwrap(), "custom template {{ message }}");
+    }
+
+    #[test]
+    fn test_progress_job_builder_body_text() {
+        let job = ProgressJobBuilder::new()
+            .body_text(Some("text mode output"))
+            .build();
+
+        assert_eq!(job.body_text, Some("text mode output".to_string()));
+    }
+
+    #[test]
+    fn test_progress_status_is_active() {
+        assert!(ProgressStatus::Running.is_active());
+        assert!(ProgressStatus::RunningCustom("custom".to_string()).is_active());
+        assert!(!ProgressStatus::Done.is_active());
+        assert!(!ProgressStatus::Failed.is_active());
+        assert!(!ProgressStatus::Pending.is_active());
+        assert!(!ProgressStatus::Hide.is_active());
+        assert!(!ProgressStatus::Warn.is_active());
+        assert!(!ProgressStatus::DoneCustom("custom".to_string()).is_active());
+    }
+
+    #[test]
+    fn test_progress_status_transitions() {
+        let job = ProgressJobBuilder::new().build();
+
+        // Default is Running
+        assert!(job.status.lock().unwrap().is_running());
+        assert!(job.is_running());
+
+        // Transition to Done
+        job.set_status(ProgressStatus::Done);
+        assert!(job.status.lock().unwrap().is_done());
+        assert!(!job.is_running());
+
+        // Transition to Failed
+        job.set_status(ProgressStatus::Failed);
+        assert!(job.status.lock().unwrap().is_failed());
+
+        // Transition to Pending
+        job.set_status(ProgressStatus::Pending);
+        assert!(job.status.lock().unwrap().is_pending());
+
+        // Transition back to Running
+        job.set_status(ProgressStatus::Running);
+        assert!(job.is_running());
+    }
+
+    #[test]
+    fn test_progress_job_set_body() {
+        let job = ProgressJobBuilder::new().build();
+        assert_eq!(*job.body.lock().unwrap(), *DEFAULT_BODY);
+
+        job.set_body("new body template");
+        assert_eq!(*job.body.lock().unwrap(), "new body template");
+    }
+
+    #[test]
+    fn test_progress_job_progress_updates() {
+        let job = ProgressJobBuilder::new()
+            .progress_total(100)
+            .build();
+
+        assert_eq!(*job.progress_total.lock().unwrap(), Some(100));
+        assert!(job.progress_current.lock().unwrap().is_none());
+
+        job.progress_current(50);
+        assert_eq!(*job.progress_current.lock().unwrap(), Some(50));
+
+        // Progress should be clamped to total
+        job.progress_current(150);
+        assert_eq!(*job.progress_current.lock().unwrap(), Some(100));
+    }
+
+    #[test]
+    fn test_progress_job_progress_total_update() {
+        let job = ProgressJobBuilder::new()
+            .progress_current(80)
+            .build();
+
+        // Setting total less than current should be adjusted
+        job.progress_total(50);
+        assert_eq!(*job.progress_total.lock().unwrap(), Some(80));
+    }
+
+    #[test]
+    fn test_progress_job_equality() {
+        let job1 = ProgressJobBuilder::new().build();
+        let job2 = ProgressJobBuilder::new().build();
+
+        // Jobs have different IDs
+        assert_ne!(job1, job2);
+
+        // Same job equals itself
+        assert_eq!(job1, job1);
+    }
+
+    #[test]
+    fn test_with_terminal_lock() {
+        // Test that with_terminal_lock returns the value from the closure
+        let result = with_terminal_lock(|| 42);
+        assert_eq!(result, 42);
+
+        let result = with_terminal_lock(|| "hello".to_string());
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_interval_get_set() {
+        let original = interval();
+
+        set_interval(Duration::from_millis(500));
+        assert_eq!(interval(), Duration::from_millis(500));
+
+        // Restore original
+        set_interval(original);
+    }
+
+    #[test]
+    fn test_output_get_set() {
+        let original = output();
+
+        set_output(ProgressOutput::Text);
+        assert_eq!(output(), ProgressOutput::Text);
+
+        set_output(ProgressOutput::UI);
+        assert_eq!(output(), ProgressOutput::UI);
+
+        // Restore original
+        set_output(original);
+    }
+
+    #[test]
+    fn test_progress_job_done_behavior() {
+        assert_eq!(ProgressJobDoneBehavior::default(), ProgressJobDoneBehavior::Keep);
+    }
+
+    #[test]
+    fn test_safe_prefix() {
+        // Returns string if it fits within max_bytes
+        assert_eq!(safe_prefix("hello", 10), "hello");
+        assert_eq!(safe_prefix("hello", 5), "hello");
+
+        // Returns prefix up to (but not including) char at max_bytes index
+        // For "hello" with max_bytes=3, indices 0,1,2 are valid, last is 2, so returns s[..2]="he"
+        assert_eq!(safe_prefix("hello", 3), "he");
+        assert_eq!(safe_prefix("hello", 1), "");
+        assert_eq!(safe_prefix("hello", 0), "");
+
+        // Test with multi-byte characters - ensures we don't split UTF-8 sequences
+        let s = "helloworld";
+        assert_eq!(safe_prefix(s, 5), "hell");
+    }
+
+    #[test]
+    fn test_progress_job_debug() {
+        let job = ProgressJobBuilder::new().build();
+        let debug_str = format!("{:?}", job);
+        assert!(debug_str.contains("ProgressJob"));
+        assert!(debug_str.contains("id:"));
+        assert!(debug_str.contains("Running"));
     }
 }

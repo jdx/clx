@@ -9,7 +9,7 @@ async fn main() {
         .prop("message", "root")
         .on_done(clx::progress::ProgressJobDoneBehavior::Collapse)
         .start();
-    ProgressJobBuilder::new()
+    let _pending = ProgressJobBuilder::new()
         .prop("message", "pending")
         .status(ProgressStatus::Pending)
         .start();

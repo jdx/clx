@@ -1,12 +1,10 @@
-extern crate log;
-
 pub use error::{Error, Result};
 
 mod error;
 pub mod osc;
 pub mod progress;
 mod progress_bar;
-mod style;
+pub mod style;
 mod tracing;
 
 // Initialize tracing on module load

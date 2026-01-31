@@ -144,4 +144,62 @@ mod tests {
         // Verify that progress values over 100 are clamped
         set_progress(ProgressState::Normal, 150);
     }
+
+    #[test]
+    fn test_progress_state_equality() {
+        assert_eq!(ProgressState::None, ProgressState::None);
+        assert_eq!(ProgressState::Normal, ProgressState::Normal);
+        assert_eq!(ProgressState::Error, ProgressState::Error);
+        assert_eq!(ProgressState::Indeterminate, ProgressState::Indeterminate);
+        assert_eq!(ProgressState::Warning, ProgressState::Warning);
+
+        assert_ne!(ProgressState::None, ProgressState::Normal);
+        assert_ne!(ProgressState::Error, ProgressState::Warning);
+    }
+
+    #[test]
+    fn test_progress_state_clone() {
+        let state = ProgressState::Normal;
+        let cloned = state.clone();
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn test_progress_state_debug() {
+        let debug_str = format!("{:?}", ProgressState::Normal);
+        assert_eq!(debug_str, "Normal");
+
+        let debug_str = format!("{:?}", ProgressState::Error);
+        assert_eq!(debug_str, "Error");
+    }
+
+    #[test]
+    fn test_progress_boundary_values() {
+        // Test boundary values for progress percentage
+        set_progress(ProgressState::Normal, 0);
+        set_progress(ProgressState::Normal, 100);
+        set_progress(ProgressState::Normal, 255); // Should be clamped to 100
+    }
+
+    #[test]
+    fn test_all_progress_states() {
+        // Ensure all states can be used with set_progress
+        for state in [
+            ProgressState::None,
+            ProgressState::Normal,
+            ProgressState::Error,
+            ProgressState::Indeterminate,
+            ProgressState::Warning,
+        ] {
+            set_progress(state, 50);
+        }
+    }
+
+    #[test]
+    fn test_clear_progress_idempotent() {
+        // Clearing progress multiple times should not panic
+        clear_progress();
+        clear_progress();
+        clear_progress();
+    }
 }
