@@ -3525,9 +3525,7 @@ mod tests {
 
     #[test]
     fn test_template_elapsed_renders() {
-        let job = ProgressJobBuilder::new()
-            .body("{{ elapsed() }}")
-            .build();
+        let job = ProgressJobBuilder::new().body("{{ elapsed() }}").build();
 
         let ctx = test_render_context(None);
         let result = render_template(&job, &ctx);
@@ -3717,7 +3715,11 @@ mod tests {
         let result = render_template(&job, &ctx);
 
         // Done status should show checkmark
-        assert!(result.contains('✔'), "Expected checkmark, got: {:?}", result);
+        assert!(
+            result.contains('✔'),
+            "Expected checkmark, got: {:?}",
+            result
+        );
     }
 
     #[test]
