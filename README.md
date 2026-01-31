@@ -64,6 +64,45 @@ for i in 0..=100 {
 job.set_status(ProgressStatus::Done);
 ```
 
+#### Multi-Operation Progress
+
+For tasks with multiple stages (e.g., download → checksum → extract), use `start_operations()` to track overall progress while showing accurate values for each stage:
+
+```rust
+let job = ProgressJobBuilder::new()
+    .body("{{ spinner() }} {{ message }} {{ bytes() }} {{ progress_bar(width=20) }}")
+    .prop("message", "Starting...")
+    .start();
+
+// Declare 3 operations
+job.start_operations(3);
+
+// Operation 1: Download (50 MB file)
+job.message("Downloading...");
+job.progress_total(50_000_000);
+for i in 0..50 {
+    job.progress_current(i * 1_000_000);
+    // bytes() shows "25.0 MB / 50.0 MB"
+    // OSC terminal progress shows ~16% (halfway through op 1 of 3)
+}
+
+// Operation 2: Verify checksum
+job.next_operation();
+job.message("Verifying...");
+job.progress_total(50_000_000);
+// OSC shows 33-66% as this progresses
+
+// Operation 3: Extract files
+job.next_operation();
+job.message("Extracting...");
+job.progress_total(200); // 200 files
+// bytes() shows file count, OSC shows 66-100%
+
+job.set_status(ProgressStatus::Done);
+```
+
+This ensures the OSC terminal progress indicator (in iTerm2, VS Code, etc.) smoothly advances from 0-100% across all operations, while `bytes()` and other template functions display the actual values for the current operation.
+
 #### Custom Templates
 
 Progress jobs use [Tera](https://tera.netlify.app/) templates:
@@ -89,6 +128,9 @@ Available template functions:
 - `elapsed()` - Time since job started (e.g., "1m23s")
 - `eta()` - Estimated time remaining based on progress
 - `rate()` - Throughput rate (e.g., "42.5/s")
+- `bytes()` - Progress as human-readable bytes (e.g., "5.2 MB / 10.4 MB")
+  - `bytes(total=false)` - Show only current bytes without total (e.g., "5.2 MB")
+  - `bytes(hide_complete=true)` - Hide when progress reaches 100%
 
 Available template filters:
 - `{{ content | flex }}` - Truncates content to fit available width
@@ -328,6 +370,25 @@ if std::env::var("CI").is_ok() || !console::user_attended_stderr() {
 | `ProgressStatus` | Job status enum (Running, Done, Failed, etc.) |
 | `ProgressJobDoneBehavior` | What to do when job completes (Keep, Collapse, Hide) |
 | `ProgressOutput` | Output mode (UI, Text) |
+
+#### `ProgressJob` Methods
+
+| Method | Description |
+|--------|-------------|
+| `progress_current(n)` | Set current progress value |
+| `progress_total(n)` | Set total progress value |
+| `increment(n)` | Increment progress by n |
+| `start_operations(n)` | Declare n operations for multi-operation tracking |
+| `next_operation()` | Advance to the next operation |
+| `message(s)` | Set the message property |
+| `prop(key, val)` | Set a template property |
+| `set_status(s)` | Set job status |
+| `set_body(s)` | Change the template |
+| `println(s)` | Print a line without interfering with display |
+| `add(job)` | Add a child job |
+| `remove()` | Remove this job from display |
+
+#### Module Functions
 
 | Function | Description |
 |----------|-------------|

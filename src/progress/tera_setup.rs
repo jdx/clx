@@ -21,13 +21,14 @@ use super::spinners::{DEFAULT_SPINNER, SPINNERS};
 pub fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     let elapsed = ctx.elapsed().as_millis() as usize;
     let job_elapsed = job.start.elapsed();
-    let job_elapsed_secs = job_elapsed.as_secs_f64();
+    // Use operation-specific elapsed time for ETA/rate calculations after next_operation()
+    let operation_elapsed_secs = job.operation_start.lock().unwrap().elapsed().as_secs_f64();
     let status = job.status.lock().unwrap().clone();
     let progress = ctx.progress;
     let width = ctx.width;
 
-    register_time_functions(tera, job_elapsed, job_elapsed_secs, progress, job);
-    register_rate_functions(tera, progress, job_elapsed_secs, job);
+    register_time_functions(tera, job_elapsed, operation_elapsed_secs, progress, job);
+    register_rate_functions(tera, progress, operation_elapsed_secs, job);
     register_progress_functions(tera, progress);
     register_spinner_function(tera, elapsed, &status);
     register_progress_bar_function(tera, progress, width);
@@ -39,7 +40,7 @@ pub fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJo
 fn register_time_functions(
     tera: &mut Tera,
     job_elapsed: Duration,
-    job_elapsed_secs: f64,
+    operation_elapsed_secs: f64,
     progress: Option<(usize, usize)>,
     job: &ProgressJob,
 ) {
@@ -49,9 +50,10 @@ fn register_time_functions(
         Ok(elapsed_str.clone().into())
     });
 
-    // eta() - estimated time remaining
+    // eta() - estimated time remaining (uses operation-specific elapsed time for fallback)
     let smoothed_rate = *job.smoothed_rate.lock().unwrap();
-    let (eta_value, eta_is_complete) = calculate_eta(progress, smoothed_rate, job_elapsed_secs);
+    let (eta_value, eta_is_complete) =
+        calculate_eta(progress, smoothed_rate, operation_elapsed_secs);
     tera.register_function("eta", move |props: &HashMap<String, tera::Value>| {
         let hide_complete = props
             .get("hide_complete")
@@ -66,10 +68,12 @@ fn register_time_functions(
 }
 
 /// Calculate ETA based on progress and rate.
+/// Uses operation_elapsed_secs for linear extrapolation fallback to give accurate
+/// estimates after next_operation() resets the smoothed rate.
 fn calculate_eta(
     progress: Option<(usize, usize)>,
     smoothed_rate: Option<f64>,
-    job_elapsed_secs: f64,
+    operation_elapsed_secs: f64,
 ) -> (Option<String>, bool) {
     if let Some((cur, total)) = progress {
         if cur > 0 && total > 0 && cur <= total {
@@ -79,16 +83,16 @@ fn calculate_eta(
                 if rate > 0.0 {
                     remaining_items / rate
                 } else {
-                    // Fall back to linear extrapolation
+                    // Fall back to linear extrapolation using operation-specific elapsed time
                     let progress_ratio = cur as f64 / total as f64;
-                    let estimated_total = job_elapsed_secs / progress_ratio;
-                    estimated_total - job_elapsed_secs
+                    let estimated_total = operation_elapsed_secs / progress_ratio;
+                    estimated_total - operation_elapsed_secs
                 }
             } else {
-                // No smoothed rate yet, use linear extrapolation
+                // No smoothed rate yet, use linear extrapolation with operation-specific time
                 let progress_ratio = cur as f64 / total as f64;
-                let estimated_total = job_elapsed_secs / progress_ratio;
-                estimated_total - job_elapsed_secs
+                let estimated_total = operation_elapsed_secs / progress_ratio;
+                estimated_total - operation_elapsed_secs
             };
 
             if remaining_secs > 0.0 {
@@ -111,26 +115,28 @@ fn calculate_eta(
 fn register_rate_functions(
     tera: &mut Tera,
     progress: Option<(usize, usize)>,
-    job_elapsed_secs: f64,
+    operation_elapsed_secs: f64,
     job: &ProgressJob,
 ) {
     let smoothed_rate = *job.smoothed_rate.lock().unwrap();
-    let rate_str = calculate_rate_string(progress, smoothed_rate, job_elapsed_secs);
+    let rate_str = calculate_rate_string(progress, smoothed_rate, operation_elapsed_secs);
     tera.register_function("rate", move |_: &HashMap<String, tera::Value>| {
         Ok(rate_str.clone().into())
     });
 }
 
 /// Calculate rate string for display.
+/// Uses operation_elapsed_secs for average rate fallback to give accurate
+/// rates after next_operation() resets the smoothed rate.
 fn calculate_rate_string(
     progress: Option<(usize, usize)>,
     smoothed_rate: Option<f64>,
-    job_elapsed_secs: f64,
+    operation_elapsed_secs: f64,
 ) -> String {
     if let Some((cur, _total)) = progress {
         let rate = smoothed_rate.unwrap_or_else(|| {
-            if job_elapsed_secs > 0.0 && cur > 0 {
-                cur as f64 / job_elapsed_secs
+            if operation_elapsed_secs > 0.0 && cur > 0 {
+                cur as f64 / operation_elapsed_secs
             } else {
                 0.0
             }
@@ -152,17 +158,25 @@ fn calculate_rate_string(
 /// Registers bytes(), percentage(), and count_format() functions.
 fn register_progress_functions(tera: &mut Tera, progress: Option<(usize, usize)>) {
     // bytes() - show progress as human-readable bytes
+    // Options:
+    //   hide_complete: bool - if true, return empty string when progress is 100%
+    //   total: bool - if false, show only current bytes without "/ total" (default: true)
     let bytes_is_complete = progress.map(|(cur, total)| cur >= total).unwrap_or(false);
     tera.register_function("bytes", move |props: &HashMap<String, tera::Value>| {
         let hide_complete = props
             .get("hide_complete")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let show_total = props.get("total").and_then(|v| v.as_bool()).unwrap_or(true);
         if hide_complete && bytes_is_complete {
             return Ok("".to_string().into());
         }
         if let Some((cur, total)) = progress {
-            Ok(format!("{} / {}", format_bytes(cur), format_bytes(total)).into())
+            if show_total {
+                Ok(format!("{} / {}", format_bytes(cur), format_bytes(total)).into())
+            } else {
+                Ok(format_bytes(cur).into())
+            }
         } else {
             Ok("".to_string().into())
         }

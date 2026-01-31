@@ -42,6 +42,47 @@
 //! parent.set_status(ProgressStatus::Done);
 //! ```
 //!
+//! # Multi-Operation Progress
+//!
+//! For tasks with multiple stages (e.g., download → checksum → extract), use
+//! [`ProgressJob::start_operations`] to track overall progress while showing
+//! accurate values for each stage:
+//!
+//! ```rust,no_run
+//! use clx::progress::{ProgressJobBuilder, ProgressStatus};
+//!
+//! let job = ProgressJobBuilder::new()
+//!     .body("{{ message }} {{ bytes() }} {{ progress_bar(width=20) }}")
+//!     .start();
+//!
+//! // Declare 3 operations
+//! job.start_operations(3);
+//!
+//! // Operation 1: Download
+//! job.message("Downloading...");
+//! job.progress_total(50_000_000); // 50 MB
+//! job.progress_current(25_000_000);
+//! // bytes() shows "25.0 MB / 50.0 MB", OSC shows ~16%
+//!
+//! // Operation 2: Checksum
+//! job.next_operation();
+//! job.message("Verifying...");
+//! job.progress_total(50_000_000);
+//! // OSC shows 33-66% as this operation progresses
+//!
+//! // Operation 3: Extract
+//! job.next_operation();
+//! job.message("Extracting...");
+//! job.progress_total(200); // files
+//! // bytes() shows file count, OSC shows 66-100%
+//!
+//! job.set_status(ProgressStatus::Done);
+//! ```
+//!
+//! This ensures the OSC terminal progress indicator (in iTerm2, VS Code, etc.)
+//! smoothly advances from 0-100% across all operations, while `bytes()` and other
+//! template functions display the actual values for the current operation.
+//!
 //! # Custom Templates
 //!
 //! Progress jobs use [Tera](https://tera.netlify.app/) templates for rendering:
@@ -467,6 +508,19 @@ mod tests {
     }
 
     #[test]
+    fn test_template_bytes_total_false() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ bytes(total=false) }}")
+            .progress_current(1024 * 512)
+            .progress_total(1024 * 1024)
+            .build();
+        let ctx = test_render_context(Some((1024 * 512, 1024 * 1024)));
+        let result = render_template(&job, &ctx);
+        // Should only show current bytes, not "X / Y"
+        assert_eq!(result, "512.0 KB");
+    }
+
+    #[test]
     fn test_template_spinner_running() {
         let job = ProgressJobBuilder::new()
             .body("{{ spinner() }}")
@@ -592,7 +646,7 @@ mod tests {
         assert!(job.smoothed_rate.lock().unwrap().is_none());
 
         job.progress_current(10);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
         job.progress_current(20);
 
         let rate = job.smoothed_rate.lock().unwrap();
@@ -610,15 +664,15 @@ mod tests {
         let job = ProgressJobBuilder::new().progress_total(1000).build();
 
         job.progress_current(0);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
 
         job.progress_current(100);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
 
         let rate1 = job.smoothed_rate.lock().unwrap().unwrap();
 
         job.progress_current(200);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
 
         let rate2 = job.smoothed_rate.lock().unwrap().unwrap();
 
@@ -636,7 +690,7 @@ mod tests {
         let job = ProgressJobBuilder::new().progress_total(100).build();
 
         job.progress_current(0);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
 
         job.progress_current(50);
         let rate_after_forward = *job.smoothed_rate.lock().unwrap();
@@ -646,7 +700,7 @@ mod tests {
             "Expected rate to be set after forward progress"
         );
 
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
 
         job.progress_current(30);
         let rate_after_attempt = *job.smoothed_rate.lock().unwrap();
@@ -672,7 +726,7 @@ mod tests {
         assert!(job.smoothed_rate.lock().unwrap().is_none());
 
         job.increment(10);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
 
         job.increment(10);
 

@@ -4,6 +4,7 @@
 //! display system, including job storage, terminal locking, and the background
 //! refresh thread.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, mpsc};
 use std::thread;
@@ -278,6 +279,10 @@ pub fn stop() {
     let _ = refresh_once();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
+    // Reset LINES to prevent subsequent stop_clear() from clearing user output
+    *LINES.lock().unwrap() = 0;
+    // Ensure all output is flushed before returning
+    let _ = std::io::stderr().flush();
 }
 
 /// Stops the progress display and clears it from the screen.
@@ -286,6 +291,8 @@ pub fn stop_clear() {
     let _ = clear();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
+    // Ensure all output is flushed before returning
+    let _ = std::io::stderr().flush();
 }
 
 // =============================================================================
@@ -345,11 +352,9 @@ pub(crate) fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
         return;
     }
 
-    // If the first top-level job has explicit progress, use that directly
-    if let (Some(current), Some(total)) = (
-        *jobs[0].progress_current.lock().unwrap(),
-        *jobs[0].progress_total.lock().unwrap(),
-    ) {
+    // If the first top-level job has explicit progress, use overall_progress()
+    // which accounts for multi-operation tracking
+    if let Some((current, total)) = jobs[0].overall_progress() {
         if total > 0 {
             let overall_percentage =
                 (current as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as u8;
@@ -422,10 +427,8 @@ fn calculate_average_progress(jobs: &[Arc<ProgressJob>]) -> (f64, usize, bool) {
     let mut has_failed_jobs = false;
 
     for job in all_jobs.iter() {
-        if let (Some(current), Some(total)) = (
-            *job.progress_current.lock().unwrap(),
-            *job.progress_total.lock().unwrap(),
-        ) {
+        // Use overall_progress() to account for multi-operation tracking
+        if let Some((current, total)) = job.overall_progress() {
             if total > 0 {
                 let progress = (current as f64 / total as f64).clamp(0.0, 1.0);
                 total_progress += progress;
