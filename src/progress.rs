@@ -3909,6 +3909,12 @@ mod tests {
         job.progress_current(50);
         let rate_after_forward = *job.smoothed_rate.lock().unwrap();
 
+        // Verify precondition: rate should be set after forward progress
+        assert!(
+            rate_after_forward.is_some(),
+            "Expected rate to be set after forward progress"
+        );
+
         std::thread::sleep(Duration::from_millis(10));
 
         // Try to go backwards (will be rejected by progress_current but let's check rate)
@@ -3963,25 +3969,13 @@ mod tests {
             .progress_total(100)
             .build();
 
-        // Set a known smoothed rate
-        *job.smoothed_rate.lock().unwrap() = Some(10.0); // 10 items/sec
-
+        // Set a known smoothed rate: 10 items/sec
         // With 50 remaining items at 10/sec, ETA should be 5 seconds
-        let ctx = RenderContext {
-            start: Instant::now(),
-            now: Instant::now(),
-            width: 80,
-            tera_ctx: Context::new(),
-            indent: 0,
-            include_children: false,
-            progress: Some((50, 100)),
-        };
-        let mut tera = Tera::default();
-        add_tera_functions(&mut tera, &ctx, &job);
-        tera.add_raw_template("body", "{{ eta() }}").unwrap();
-        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+        *job.smoothed_rate.lock().unwrap() = Some(10.0);
 
-        // Should show "5s" (50 remaining / 10 per sec = 5 sec)
+        let ctx = test_render_context(Some((50, 100)));
+        let result = render_template(&job, &ctx);
+
         assert_eq!(result, "5s");
     }
 
@@ -3994,22 +3988,10 @@ mod tests {
             .progress_total(100)
             .build();
 
-        // Set a known smoothed rate
         *job.smoothed_rate.lock().unwrap() = Some(42.5);
 
-        let ctx = RenderContext {
-            start: Instant::now(),
-            now: Instant::now(),
-            width: 80,
-            tera_ctx: Context::new(),
-            indent: 0,
-            include_children: false,
-            progress: Some((50, 100)),
-        };
-        let mut tera = Tera::default();
-        add_tera_functions(&mut tera, &ctx, &job);
-        tera.add_raw_template("body", "{{ rate() }}").unwrap();
-        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+        let ctx = test_render_context(Some((50, 100)));
+        let result = render_template(&job, &ctx);
 
         assert_eq!(result, "42.5/s");
     }
@@ -4026,21 +4008,8 @@ mod tests {
         // Don't set smoothed_rate - it should remain None
         assert!(job.smoothed_rate.lock().unwrap().is_none());
 
-        // With 50% done, the ETA calculation falls back to linear extrapolation
-        // Since job just started, elapsed is ~0, so linear extrapolation gives small/zero ETA
-        let ctx = RenderContext {
-            start: Instant::now(),
-            now: Instant::now(),
-            width: 80,
-            tera_ctx: Context::new(),
-            indent: 0,
-            include_children: false,
-            progress: Some((50, 100)),
-        };
-        let mut tera = Tera::default();
-        add_tera_functions(&mut tera, &ctx, &job);
-        tera.add_raw_template("body", "{{ eta() }}").unwrap();
-        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+        let ctx = test_render_context(Some((50, 100)));
+        let result = render_template(&job, &ctx);
 
         // Should return something (even "0s" is valid for instant start)
         assert!(
@@ -4062,21 +4031,8 @@ mod tests {
         // Don't set smoothed_rate
         assert!(job.smoothed_rate.lock().unwrap().is_none());
 
-        // With no smoothed rate, it falls back to current/elapsed
-        // Since job just started, elapsed is ~0, so rate calculation may return 0 or -
-        let ctx = RenderContext {
-            start: Instant::now(),
-            now: Instant::now(),
-            width: 80,
-            tera_ctx: Context::new(),
-            indent: 0,
-            include_children: false,
-            progress: Some((100, 200)),
-        };
-        let mut tera = Tera::default();
-        add_tera_functions(&mut tera, &ctx, &job);
-        tera.add_raw_template("body", "{{ rate() }}").unwrap();
-        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+        let ctx = test_render_context(Some((100, 200)));
+        let result = render_template(&job, &ctx);
 
         // Should return a valid rate format
         assert!(
@@ -4095,22 +4051,10 @@ mod tests {
             .progress_total(100)
             .build();
 
-        // Set rate to zero
         *job.smoothed_rate.lock().unwrap() = Some(0.0);
 
-        let ctx = RenderContext {
-            start: Instant::now(),
-            now: Instant::now(),
-            width: 80,
-            tera_ctx: Context::new(),
-            indent: 0,
-            include_children: false,
-            progress: Some((50, 100)),
-        };
-        let mut tera = Tera::default();
-        add_tera_functions(&mut tera, &ctx, &job);
-        tera.add_raw_template("body", "{{ eta() }}").unwrap();
-        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+        let ctx = test_render_context(Some((50, 100)));
+        let result = render_template(&job, &ctx);
 
         // Should still return a valid ETA (falls back to linear)
         assert!(
@@ -4129,24 +4073,11 @@ mod tests {
             .progress_total(100)
             .build();
 
-        // Set rate to zero
         *job.smoothed_rate.lock().unwrap() = Some(0.0);
 
-        let ctx = RenderContext {
-            start: Instant::now(),
-            now: Instant::now(),
-            width: 80,
-            tera_ctx: Context::new(),
-            indent: 0,
-            include_children: false,
-            progress: Some((50, 100)),
-        };
-        let mut tera = Tera::default();
-        add_tera_functions(&mut tera, &ctx, &job);
-        tera.add_raw_template("body", "{{ rate() }}").unwrap();
-        let result = tera.render("body", &ctx.tera_ctx).unwrap();
+        let ctx = test_render_context(Some((50, 100)));
+        let result = render_template(&job, &ctx);
 
-        // Zero rate shows -/s
         assert_eq!(result, "-/s");
     }
 }
