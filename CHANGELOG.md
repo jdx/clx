@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/jdx/clx/compare/v1.2.0...v1.3.0) - 2026-01-31
+
+### Added
+
+- *(progress)* add multi-operation progress tracking ([#64](https://github.com/jdx/clx/pull/64))
+
 ## [1.2.0](https://github.com/jdx/clx/compare/v1.1.0...v1.2.0) - 2026-01-31
 
 ### Added
