@@ -13,7 +13,6 @@ use std::{
 };
 
 use console::Term;
-use indicatif::TermLike;
 use tera::{Context, Tera};
 
 // Include OSC progress functionality
@@ -253,7 +252,7 @@ impl Default for RenderContext {
         Self {
             start: Instant::now(),
             now: Instant::now(),
-            width: term().width() as usize,
+            width: term().size().1 as usize,
             tera_ctx,
             indent: 0,
             include_children: true,
@@ -563,7 +562,7 @@ impl ProgressJob {
                 if !output.is_empty() {
                     // Safety check: ensure no flex tags are visible
                     let final_output = if output.contains("<clx:flex>") {
-                        flex(&output, term().width() as usize)
+                        flex(&output, term().size().1 as usize)
                     } else {
                         output
                     };
@@ -586,7 +585,7 @@ impl ProgressJob {
             pause();
             // Safety check: ensure no flex tags are visible
             let output = if s.contains("<clx:flex>") {
-                flex(s, term().width() as usize)
+                flex(s, term().size().1 as usize)
             } else {
                 s.to_string()
             };
@@ -787,7 +786,7 @@ fn refresh() -> Result<bool> {
 
     // Process any remaining flex tags
     let final_output = if output.contains("<clx:flex>") || output.contains("<clx:flex_fill>") {
-        flex(&output, term.width() as usize)
+        flex(&output, term.size().1 as usize)
     } else {
         output
     };
@@ -812,7 +811,7 @@ fn refresh() -> Result<bool> {
     // Robustly clear the previously rendered frame
     if *lines > 0 {
         term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term.width() as usize)?;
+        term.move_cursor_left(term.size().1 as usize)?;
         term.clear_to_end_of_screen()?;
     }
     if !final_output.is_empty() {
@@ -822,7 +821,7 @@ fn refresh() -> Result<bool> {
         term.write_line(&final_output)?;
 
         // Count how many terminal rows were consumed, accounting for wrapping
-        let term_width = term.width() as usize;
+        let term_width = term.size().1 as usize;
         let mut consumed_rows = 0usize;
         for line in final_output.lines() {
             let visible_width = console::measure_text_width(line).max(1);
@@ -874,12 +873,12 @@ fn refresh_once() -> Result<()> {
     let _guard = TERM_LOCK.lock().unwrap();
     if *lines > 0 {
         term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term.width() as usize)?;
+        term.move_cursor_left(term.size().1 as usize)?;
         term.clear_to_end_of_screen()?;
     }
     if !output.is_empty() {
         let final_output = if output.contains("<clx:flex>") {
-            flex(&output, term.width() as usize)
+            flex(&output, term.size().1 as usize)
         } else {
             output
         };
@@ -888,7 +887,7 @@ fn refresh_once() -> Result<()> {
         diagnostics::log_frame(&final_output, &jobs);
 
         term.write_line(&final_output)?;
-        let term_width = term.width() as usize;
+        let term_width = term.size().1 as usize;
         let mut consumed_rows = 0usize;
         for line in final_output.lines() {
             let visible_width = console::measure_text_width(line).max(1);
@@ -1079,7 +1078,7 @@ fn clear() -> Result<()> {
     if *lines > 0 {
         let _guard = TERM_LOCK.lock().unwrap();
         term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term.width() as usize)?;
+        term.move_cursor_left(term.size().1 as usize)?;
         term.clear_to_end_of_screen()?;
         drop(_guard);
     }
