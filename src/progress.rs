@@ -1104,31 +1104,31 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     // eta() - estimated time remaining based on progress
     // Options:
     //   hide_complete: bool - if true, return empty string when progress is complete or no ETA available
-    let (eta_str, eta_is_complete) = if let Some((cur, total)) = progress {
+    let (eta_value, eta_is_complete) = if let Some((cur, total)) = progress {
         if cur > 0 && total > 0 && cur <= total {
             let progress_ratio = cur as f64 / total as f64;
             let estimated_total = job_elapsed_secs / progress_ratio;
             let remaining = estimated_total - job_elapsed_secs;
             if remaining > 0.0 {
-                (format_duration(Duration::from_secs_f64(remaining)), false)
+                (Some(format_duration(Duration::from_secs_f64(remaining))), false)
             } else {
-                ("0s".to_string(), true) // 0s means complete
+                (Some("0s".to_string()), true) // 0s means complete
             }
         } else {
-            ("-".to_string(), cur >= total) // "-" with cur >= total means complete
+            (None, cur >= total) // No ETA calculable, but might be complete
         }
     } else {
-        ("-".to_string(), false)
+        (None, false) // No progress info
     };
     tera.register_function("eta", move |props: &HashMap<String, tera::Value>| {
         let hide_complete = props
             .get("hide_complete")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if hide_complete && (eta_is_complete || eta_str == "-") {
+        if hide_complete && (eta_is_complete || eta_value.is_none()) {
             Ok("".to_string().into())
         } else {
-            Ok(eta_str.clone().into())
+            Ok(eta_value.clone().unwrap_or_else(|| "-".to_string()).into())
         }
     });
 
