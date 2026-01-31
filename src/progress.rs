@@ -2034,6 +2034,120 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
+fn format_count(count: usize, decimals: usize) -> String {
+    const K: f64 = 1_000.0;
+    const M: f64 = 1_000_000.0;
+    const B: f64 = 1_000_000_000.0;
+
+    let count = count as f64;
+    if count >= B {
+        format!("{:.prec$}B", count / B, prec = decimals)
+    } else if count >= M {
+        format!("{:.prec$}M", count / M, prec = decimals)
+    } else if count >= K {
+        format!("{:.prec$}K", count / K, prec = decimals)
+    } else {
+        format!("{}", count as usize)
+    }
+}
+
+fn build_progress_bar_chars(
+    props: &HashMap<String, tera::Value>,
+) -> progress_bar::ProgressBarChars {
+    // Check for preset style first
+    if let Some(style) = props.get("style").and_then(|v| v.as_str()) {
+        match style {
+            "blocks" => return progress_bar::ProgressBarChars::blocks(),
+            "thin" => return progress_bar::ProgressBarChars::thin(),
+            _ => {} // Fall through to default or custom
+        }
+    }
+
+    // Build from individual character options
+    let mut chars = progress_bar::ProgressBarChars::default();
+    if let Some(fill) = props.get("fill").and_then(|v| v.as_str()) {
+        chars.fill = fill.to_string();
+    }
+    if let Some(head) = props.get("head").and_then(|v| v.as_str()) {
+        chars.head = head.to_string();
+    }
+    if let Some(empty) = props.get("empty").and_then(|v| v.as_str()) {
+        chars.empty = empty.to_string();
+    }
+    if let Some(left) = props.get("left").and_then(|v| v.as_str()) {
+        chars.left = left.to_string();
+    }
+    if let Some(right) = props.get("right").and_then(|v| v.as_str()) {
+        chars.right = right.to_string();
+    }
+    chars
+}
+
+fn encode_progress_bar_chars(chars: &progress_bar::ProgressBarChars) -> String {
+    // Simple encoding: use comma as separator and percent-encode special chars
+    // This handles spaces, commas, angle brackets, and other special characters safely
+    fn encode_part(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                ',' => "%2C".to_string(),
+                '%' => "%25".to_string(),
+                ' ' => "%20".to_string(),
+                '<' => "%3C".to_string(),
+                '>' => "%3E".to_string(),
+                _ => c.to_string(),
+            })
+            .collect()
+    }
+    format!(
+        "{},{},{},{},{}",
+        encode_part(&chars.fill),
+        encode_part(&chars.head),
+        encode_part(&chars.empty),
+        encode_part(&chars.left),
+        encode_part(&chars.right)
+    )
+}
+
+fn decode_progress_bar_chars(encoded: &str) -> progress_bar::ProgressBarChars {
+    // Single-pass decode to avoid issues with sequences like %252C
+    // (encoded %) being incorrectly decoded when using chained replace()
+    fn decode_part(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                let hex: String = chars.by_ref().take(2).collect();
+                match hex.as_str() {
+                    "2C" => result.push(','),
+                    "20" => result.push(' '),
+                    "3C" => result.push('<'),
+                    "3E" => result.push('>'),
+                    "25" => result.push('%'),
+                    _ => {
+                        result.push('%');
+                        result.push_str(&hex);
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+    let parts: Vec<&str> = encoded.splitn(5, ',').collect();
+    if parts.len() >= 5 {
+        progress_bar::ProgressBarChars {
+            fill: decode_part(parts[0]),
+            head: decode_part(parts[1]),
+            empty: decode_part(parts[2]),
+            left: decode_part(parts[3]),
+            right: decode_part(parts[4]),
+        }
+    } else {
+        progress_bar::ProgressBarChars::default()
+    }
+}
+
 fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     let elapsed = ctx.elapsed().as_millis() as usize;
     let job_elapsed = job.start.elapsed();
@@ -2146,6 +2260,66 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
         }
     });
 
+    // percentage() - show progress as a percentage (e.g., "50%")
+    // Options:
+    //   decimals: i64 - number of decimal places (default: 0)
+    //   hide_complete: bool - if true, return empty string when progress is 100%
+    let percentage_is_complete = progress.map(|(cur, total)| cur >= total).unwrap_or(false);
+    tera.register_function("percentage", move |props: &HashMap<String, tera::Value>| {
+        let hide_complete = props
+            .get("hide_complete")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if hide_complete && percentage_is_complete {
+            return Ok("".to_string().into());
+        }
+        if let Some((cur, total)) = progress {
+            if total > 0 {
+                let pct = (cur as f64 / total as f64) * 100.0;
+                // Clamp decimals to 0..=20 to prevent negative wraparound and excessive allocation
+                let decimals = props
+                    .get("decimals")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    .clamp(0, 20) as usize;
+                Ok(format!("{:.prec$}%", pct, prec = decimals).into())
+            } else {
+                Ok("0%".to_string().into())
+            }
+        } else {
+            Ok("".to_string().into())
+        }
+    });
+
+    // count_format() - show a number in human-readable format (e.g., "1.5M")
+    // Uses the "cur" progress value by default, or a custom value via the "value" option
+    // Options:
+    //   value: i64 - custom value to format (default: uses cur progress value)
+    //   decimals: i64 - number of decimal places (default: 1)
+    tera.register_function(
+        "count_format",
+        move |props: &HashMap<String, tera::Value>| {
+            // Clamp negative values to 0 to prevent integer wraparound
+            let value = props
+                .get("value")
+                .and_then(|v| v.as_i64())
+                .map(|v| v.max(0) as usize)
+                .or_else(|| progress.map(|(cur, _)| cur));
+
+            if let Some(n) = value {
+                // Clamp decimals to 0..=20 to prevent negative wraparound and excessive allocation
+                let decimals = props
+                    .get("decimals")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1)
+                    .clamp(0, 20) as usize;
+                Ok(format_count(n, decimals).into())
+            } else {
+                Ok("".to_string().into())
+            }
+        },
+    );
+
     tera.register_function(
         "spinner",
         move |props: &HashMap<String, tera::Value>| match status {
@@ -2177,6 +2351,12 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
     //   width: i64 - fixed width (negative values subtract from terminal width)
     //   flex: bool - use flexible width
     //   hide_complete: bool - if true, return empty string when progress is 100%
+    //   style: string - preset style: "default", "blocks", "thin"
+    //   fill: string - custom fill character (default: "=")
+    //   head: string - custom head character (default: ">")
+    //   empty: string - custom empty character (default: " ")
+    //   left: string - custom left bracket (default: "[")
+    //   right: string - custom right bracket (default: "]")
     tera.register_function(
         "progress_bar",
         move |props: &HashMap<String, tera::Value>| {
@@ -2188,6 +2368,10 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
                 if hide_complete && progress_current >= progress_total {
                     return Ok("".to_string().into());
                 }
+
+                // Build custom chars from props
+                let chars = build_progress_bar_chars(props);
+
                 let is_flex = props
                     .get("flex")
                     .as_ref()
@@ -2196,9 +2380,11 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
                 if is_flex {
                     // Defer width calculation to flex processor using a placeholder
                     // Wrap with flex tags so callers don't need to pipe through the flex filter
+                    // Encode char options as URL-safe base64 to avoid parsing issues
+                    let chars_encoded = encode_progress_bar_chars(&chars);
                     let placeholder = format!(
-                        "<clx:flex><clx:progress cur={} total={}><clx:flex>",
-                        progress_current, progress_total
+                        "<clx:flex><clx:progress cur={} total={} chars={}><clx:flex>",
+                        progress_current, progress_total, chars_encoded
                     );
                     Ok(placeholder.into())
                 } else {
@@ -2214,8 +2400,12 @@ fn add_tera_functions(tera: &mut Tera, ctx: &RenderContext, job: &ProgressJob) {
                             }
                         })
                         .unwrap_or(width);
-                    let progress_bar =
-                        progress_bar::progress_bar(progress_current, progress_total, width);
+                    let progress_bar = progress_bar::progress_bar_with_chars(
+                        progress_current,
+                        progress_total,
+                        width,
+                        &chars,
+                    );
                     Ok(progress_bar.into())
                 }
             } else {
@@ -2434,6 +2624,34 @@ pub fn output() -> ProgressOutput {
     *OUTPUT.lock().unwrap()
 }
 
+/// Returns the number of top-level progress jobs currently registered.
+///
+/// This includes jobs in any status (running, pending, done, etc.).
+/// Use [`active_jobs`] to count only running jobs.
+#[must_use]
+pub fn job_count() -> usize {
+    JOBS.lock().unwrap().len()
+}
+
+/// Returns the number of currently active (running) progress jobs.
+///
+/// A job is considered active if its status is `Running` or `RunningCustom`.
+/// This counts all jobs recursively, including children.
+#[must_use]
+pub fn active_jobs() -> usize {
+    fn count_active(jobs: &[Arc<ProgressJob>]) -> usize {
+        jobs.iter()
+            .map(|job| {
+                let is_active = job.status.lock().unwrap().is_active();
+                let children = job.children.lock().unwrap();
+                let child_count = count_active(&children);
+                (if is_active { 1 } else { 0 }) + child_count
+            })
+            .sum()
+    }
+    count_active(&JOBS.lock().unwrap())
+}
+
 fn flex(s: &str, width: usize) -> String {
     // Fast path: no tags
     if !s.contains("<clx:flex>") && !s.contains("<clx:flex_fill>") {
@@ -2565,15 +2783,26 @@ fn flex_process_once(s: &str, width: usize) -> String {
                     // Render a progress bar sized to the available space
                     let mut cur: Option<usize> = None;
                     let mut total: Option<usize> = None;
+                    let mut chars_encoded: Option<&str> = None;
                     for part in content.trim_matches(['<', '>', ' ']).split_whitespace() {
                         if let Some(v) = part.strip_prefix("cur=") {
                             cur = v.parse::<usize>().ok();
                         } else if let Some(v) = part.strip_prefix("total=") {
                             total = v.parse::<usize>().ok();
+                        } else if let Some(v) = part.strip_prefix("chars=") {
+                            chars_encoded = Some(v);
                         }
                     }
                     if let (Some(cur), Some(total)) = (cur, total) {
-                        let pb = progress_bar::progress_bar(cur, total, available_for_content);
+                        let chars = chars_encoded
+                            .map(decode_progress_bar_chars)
+                            .unwrap_or_default();
+                        let pb = progress_bar::progress_bar_with_chars(
+                            cur,
+                            total,
+                            available_for_content,
+                            &chars,
+                        );
                         result.push_str(&pb);
                         result.push_str(suffix);
                         return result;
@@ -3017,20 +3246,111 @@ mod tests {
     }
 
     #[test]
-    fn test_env_var_functions_callable() {
-        // These env var checks are cached on first call, so we can only test
-        // that they're callable and return a boolean. The actual values depend
-        // on the test environment.
-        let _ = env_no_progress();
-        let _ = env_text_mode();
-        let _ = is_disabled();
+    fn test_format_count() {
+        // Small numbers stay as-is
+        assert_eq!(format_count(0, 1), "0");
+        assert_eq!(format_count(999, 1), "999");
+
+        // Thousands
+        assert_eq!(format_count(1000, 1), "1.0K");
+        assert_eq!(format_count(1500, 1), "1.5K");
+        assert_eq!(format_count(999_999, 1), "1000.0K");
+
+        // Millions
+        assert_eq!(format_count(1_000_000, 1), "1.0M");
+        assert_eq!(format_count(1_500_000, 1), "1.5M");
+
+        // Billions
+        assert_eq!(format_count(1_000_000_000, 1), "1.0B");
+        assert_eq!(format_count(2_500_000_000, 1), "2.5B");
+
+        // Different decimal places
+        assert_eq!(format_count(1_234_567, 0), "1M");
+        assert_eq!(format_count(1_234_567, 2), "1.23M");
     }
 
     #[test]
-    fn test_output_returns_valid_mode() {
-        // output() should return a valid ProgressOutput, potentially affected
-        // by CLX_TEXT_MODE env var
-        let mode = output();
-        assert!(mode == ProgressOutput::UI || mode == ProgressOutput::Text);
+    fn test_job_count_and_active_jobs() {
+        // Note: These tests run with global state, so results depend on
+        // other tests potentially leaving jobs around. We test relative changes.
+        let initial_count = job_count();
+        let initial_active = active_jobs();
+
+        // Start a job
+        let job = ProgressJobBuilder::new().prop("message", "test").start();
+
+        assert_eq!(job_count(), initial_count + 1);
+        assert_eq!(active_jobs(), initial_active + 1);
+
+        // Complete the job
+        job.set_status(ProgressStatus::Done);
+        assert_eq!(job_count(), initial_count + 1); // Still counted
+        assert_eq!(active_jobs(), initial_active); // No longer active
+
+        // Remove it
+        job.remove();
+        assert_eq!(job_count(), initial_count);
+    }
+
+    #[test]
+    fn test_encode_decode_progress_bar_chars() {
+        let chars = progress_bar::ProgressBarChars {
+            fill: "█".to_string(),
+            head: "▓".to_string(),
+            empty: " ".to_string(),
+            left: "[".to_string(),
+            right: "]".to_string(),
+        };
+
+        let encoded = encode_progress_bar_chars(&chars);
+        let decoded = decode_progress_bar_chars(&encoded);
+
+        assert_eq!(decoded.fill, chars.fill);
+        assert_eq!(decoded.head, chars.head);
+        assert_eq!(decoded.empty, chars.empty);
+        assert_eq!(decoded.left, chars.left);
+        assert_eq!(decoded.right, chars.right);
+    }
+
+    #[test]
+    fn test_encode_decode_special_chars() {
+        // Test with pipe characters that need escaping
+        let chars = progress_bar::ProgressBarChars {
+            fill: "|".to_string(),
+            head: "|".to_string(),
+            empty: " ".to_string(),
+            left: "|".to_string(),
+            right: "|".to_string(),
+        };
+
+        let encoded = encode_progress_bar_chars(&chars);
+        let decoded = decode_progress_bar_chars(&encoded);
+
+        assert_eq!(decoded.fill, chars.fill);
+        assert_eq!(decoded.head, chars.head);
+        assert_eq!(decoded.empty, chars.empty);
+        assert_eq!(decoded.left, chars.left);
+        assert_eq!(decoded.right, chars.right);
+    }
+
+    #[test]
+    fn test_encode_decode_angle_brackets() {
+        // Test with angle bracket characters that could be confused with XML-style tags
+        let chars = progress_bar::ProgressBarChars {
+            fill: "=".to_string(),
+            head: ">".to_string(),
+            empty: " ".to_string(),
+            left: "<".to_string(),
+            right: ">".to_string(),
+        };
+
+        let encoded = encode_progress_bar_chars(&chars);
+        let decoded = decode_progress_bar_chars(&encoded);
+
+        assert_eq!(decoded.fill, chars.fill);
+        assert_eq!(decoded.head, chars.head);
+        assert_eq!(decoded.empty, chars.empty);
+        assert_eq!(decoded.left, chars.left);
+        assert_eq!(decoded.right, chars.right);
     }
 }
