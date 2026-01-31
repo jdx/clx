@@ -464,16 +464,19 @@ static INTERVAL: Mutex<Duration> = Mutex::new(Duration::from_millis(200));
 static ENV_NO_PROGRESS: OnceLock<bool> = OnceLock::new();
 static ENV_TEXT_MODE: OnceLock<bool> = OnceLock::new();
 
+/// Checks if an environment variable is set to a truthy value ("1" or "true").
+fn check_env_bool(var_name: &str) -> bool {
+    std::env::var(var_name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Returns true if progress display is disabled via `CLX_NO_PROGRESS=1` environment variable.
 ///
 /// When disabled, progress jobs can still be created but nothing will be displayed.
 /// This is checked once and cached for the lifetime of the process.
 fn env_no_progress() -> bool {
-    *ENV_NO_PROGRESS.get_or_init(|| {
-        std::env::var("CLX_NO_PROGRESS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    *ENV_NO_PROGRESS.get_or_init(|| check_env_bool("CLX_NO_PROGRESS"))
 }
 
 /// Returns true if text mode is forced via `CLX_TEXT_MODE=1` environment variable.
@@ -481,11 +484,7 @@ fn env_no_progress() -> bool {
 /// When set, progress will always use text mode regardless of [`set_output`] calls.
 /// This is checked once and cached for the lifetime of the process.
 fn env_text_mode() -> bool {
-    *ENV_TEXT_MODE.get_or_init(|| {
-        std::env::var("CLX_TEXT_MODE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    *ENV_TEXT_MODE.get_or_init(|| check_env_bool("CLX_TEXT_MODE"))
 }
 
 /// Returns whether progress display is currently disabled.
