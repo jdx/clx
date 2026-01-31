@@ -168,6 +168,7 @@ impl ProgressJobBuilder {
             smoothed_rate: Mutex::new(None),
             operations_total: Mutex::new(None),
             operation_index: Mutex::new(0),
+            operation_start: Mutex::new(Instant::now()),
         }
     }
 
@@ -202,6 +203,8 @@ pub struct ProgressJob {
     pub(crate) operations_total: Mutex<Option<usize>>,
     /// Multi-operation tracking: current operation index (0-indexed)
     pub(crate) operation_index: Mutex<usize>,
+    /// Start time of the current operation (for ETA calculation after next_operation)
+    pub(crate) operation_start: Mutex<Instant>,
 }
 
 impl ProgressJob {
@@ -432,6 +435,8 @@ impl ProgressJob {
         // Reset rate tracking for accurate ETA on new operation
         *self.last_progress_update.lock().unwrap() = None;
         *self.smoothed_rate.lock().unwrap() = None;
+        // Reset operation start time so ETA fallback uses correct elapsed time
+        *self.operation_start.lock().unwrap() = Instant::now();
 
         // Advance operation index after clearing progress values
         *self.operation_index.lock().unwrap() += 1;
