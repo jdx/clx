@@ -29,3 +29,7 @@ nix = { version = "0.31", features = ["signal", "user"] }
 
 [dev-dependencies]
 test-log = "0.2"
+
+[[example]]
+name = "log_integration"
+required-features = ["log"]
