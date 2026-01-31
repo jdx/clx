@@ -3442,4 +3442,393 @@ mod tests {
         let result = check_resize_signaled();
         assert!(!result); // Should be false since no signal was sent
     }
+
+    // ==================== Template Helper Function Tests ====================
+
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
+        assert_eq!(format_duration(Duration::from_secs(1)), "1s");
+        assert_eq!(format_duration(Duration::from_secs(30)), "30s");
+        assert_eq!(format_duration(Duration::from_secs(59)), "59s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes() {
+        assert_eq!(format_duration(Duration::from_secs(60)), "1m0s");
+        assert_eq!(format_duration(Duration::from_secs(61)), "1m1s");
+        assert_eq!(format_duration(Duration::from_secs(90)), "1m30s");
+        assert_eq!(format_duration(Duration::from_secs(3599)), "59m59s");
+    }
+
+    #[test]
+    fn test_format_duration_hours() {
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1h0m0s");
+        assert_eq!(format_duration(Duration::from_secs(3661)), "1h1m1s");
+        assert_eq!(format_duration(Duration::from_secs(7200)), "2h0m0s");
+        assert_eq!(format_duration(Duration::from_secs(86399)), "23h59m59s");
+    }
+
+    #[test]
+    fn test_format_bytes_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1), "1 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_bytes_kilobytes() {
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(10240), "10.0 KB");
+        assert_eq!(format_bytes(1024 * 1023), "1023.0 KB");
+    }
+
+    #[test]
+    fn test_format_bytes_megabytes() {
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(1024 * 1024 + 512 * 1024), "1.5 MB");
+        assert_eq!(format_bytes(100 * 1024 * 1024), "100.0 MB");
+    }
+
+    #[test]
+    fn test_format_bytes_gigabytes() {
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    // ==================== Template Function Rendering Tests ====================
+
+    /// Helper to create a RenderContext for testing template functions
+    fn test_render_context(progress: Option<(usize, usize)>) -> RenderContext {
+        let now = Instant::now();
+        RenderContext {
+            start: now,
+            now,
+            width: 80,
+            tera_ctx: Context::new(),
+            indent: 0,
+            include_children: false,
+            progress,
+        }
+    }
+
+    /// Helper to render a template with a job
+    fn render_template(job: &ProgressJob, ctx: &RenderContext) -> String {
+        let mut tera = Tera::default();
+        add_tera_functions(&mut tera, ctx, job);
+        tera.add_raw_template("body", &job.body.lock().unwrap())
+            .unwrap();
+        tera.render("body", &ctx.tera_ctx).unwrap()
+    }
+
+    #[test]
+    fn test_template_elapsed_renders() {
+        let job = ProgressJobBuilder::new().body("{{ elapsed() }}").build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // Should be "0s" since we just started
+        assert_eq!(result, "0s");
+    }
+
+    #[test]
+    fn test_template_eta_no_progress() {
+        let job = ProgressJobBuilder::new().body("{{ eta() }}").build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // No progress, should show "-"
+        assert_eq!(result, "-");
+    }
+
+    #[test]
+    fn test_template_eta_with_progress() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ eta() }}")
+            .progress_current(50)
+            .progress_total(100)
+            .build();
+
+        let ctx = test_render_context(Some((50, 100)));
+        let result = render_template(&job, &ctx);
+
+        // With 50/100 done in ~0s, ETA will be based on extrapolation
+        // Result should be a valid duration string or "-" if elapsed is too small
+        assert!(
+            result.ends_with('s') || result.ends_with('m') || result == "-" || result == "0s",
+            "Expected duration format, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_template_eta_hide_complete() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ eta(hide_complete=true) }}")
+            .progress_current(100)
+            .progress_total(100)
+            .build();
+
+        let ctx = test_render_context(Some((100, 100)));
+        let result = render_template(&job, &ctx);
+
+        // Complete with hide_complete=true should be empty
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_template_rate_no_progress() {
+        let job = ProgressJobBuilder::new().body("{{ rate() }}").build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // No progress should show "-/s"
+        assert_eq!(result, "-/s");
+    }
+
+    #[test]
+    fn test_template_rate_with_smoothed_rate() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ rate() }}")
+            .progress_current(100)
+            .progress_total(200)
+            .build();
+
+        // Set a smoothed rate directly for testing
+        *job.smoothed_rate.lock().unwrap() = Some(10.0);
+
+        let ctx = test_render_context(Some((100, 200)));
+        let result = render_template(&job, &ctx);
+
+        // With smoothed rate of 10.0, should show "10.0/s"
+        assert_eq!(result, "10.0/s");
+    }
+
+    #[test]
+    fn test_template_rate_slow() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ rate() }}")
+            .progress_current(1)
+            .progress_total(100)
+            .build();
+
+        // Set a slow smoothed rate (less than 1/s but more than 1/min)
+        *job.smoothed_rate.lock().unwrap() = Some(0.5);
+
+        let ctx = test_render_context(Some((1, 100)));
+        let result = render_template(&job, &ctx);
+
+        // Slow rate should show per-minute: 0.5/s = 30/m
+        assert_eq!(result, "30.0/m");
+    }
+
+    #[test]
+    fn test_template_rate_very_slow() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ rate() }}")
+            .progress_current(1)
+            .progress_total(100)
+            .build();
+
+        // Set a very slow smoothed rate (less than 1/min)
+        *job.smoothed_rate.lock().unwrap() = Some(0.01);
+
+        let ctx = test_render_context(Some((1, 100)));
+        let result = render_template(&job, &ctx);
+
+        // Very slow rate should show per-second with more precision
+        assert_eq!(result, "0.01/s");
+    }
+
+    #[test]
+    fn test_template_bytes_no_progress() {
+        let job = ProgressJobBuilder::new().body("{{ bytes() }}").build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // No progress should be empty
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_template_bytes_with_progress() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ bytes() }}")
+            .progress_current(1024 * 512) // 512 KB
+            .progress_total(1024 * 1024) // 1 MB
+            .build();
+
+        let ctx = test_render_context(Some((1024 * 512, 1024 * 1024)));
+        let result = render_template(&job, &ctx);
+
+        assert_eq!(result, "512.0 KB / 1.0 MB");
+    }
+
+    #[test]
+    fn test_template_bytes_hide_complete() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ bytes(hide_complete=true) }}")
+            .progress_current(1024)
+            .progress_total(1024)
+            .build();
+
+        let ctx = test_render_context(Some((1024, 1024)));
+        let result = render_template(&job, &ctx);
+
+        // Complete with hide_complete=true should be empty
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_template_spinner_running() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ spinner() }}")
+            .status(ProgressStatus::Running)
+            .build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // Running status should show a spinner frame (with ANSI blue color)
+        // The exact frame depends on timing, but it should contain the blue color code
+        assert!(
+            result.contains("\x1b[") || !result.is_empty(),
+            "Expected spinner output, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_template_spinner_done() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ spinner() }}")
+            .status(ProgressStatus::Done)
+            .build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // Done status should show checkmark
+        assert!(
+            result.contains('✔'),
+            "Expected checkmark, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_template_spinner_failed() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ spinner() }}")
+            .status(ProgressStatus::Failed)
+            .build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // Failed status should show X mark
+        assert!(result.contains('✗'), "Expected X mark, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_template_spinner_pending() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ spinner() }}")
+            .status(ProgressStatus::Pending)
+            .build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // Pending status should show pause symbol
+        assert!(
+            result.contains('⏸'),
+            "Expected pause symbol, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_template_spinner_warn() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ spinner() }}")
+            .status(ProgressStatus::Warn)
+            .build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // Warn status should show warning symbol
+        assert!(
+            result.contains('⚠'),
+            "Expected warning symbol, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_template_spinner_custom() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ spinner() }}")
+            .status(ProgressStatus::RunningCustom("🔥".to_string()))
+            .build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // Custom status should show custom string
+        assert_eq!(result, "🔥");
+    }
+
+    #[test]
+    fn test_template_spinner_done_custom() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ spinner() }}")
+            .status(ProgressStatus::DoneCustom("🎉".to_string()))
+            .build();
+
+        let ctx = test_render_context(None);
+        let result = render_template(&job, &ctx);
+
+        // DoneCustom status should show custom string
+        assert_eq!(result, "🎉");
+    }
+
+    #[test]
+    fn test_template_progress_bar_basic() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ progress_bar(width=20) }}")
+            .progress_current(5)
+            .progress_total(10)
+            .build();
+
+        let ctx = test_render_context(Some((5, 10)));
+        let result = render_template(&job, &ctx);
+
+        // Should contain brackets and be roughly 20 chars
+        assert!(result.contains('[') && result.contains(']'));
+        // Progress bar at 50% should have some filled portion
+        assert!(result.contains('━') || result.contains('=') || result.contains('#'));
+    }
+
+    #[test]
+    fn test_template_progress_bar_hide_complete() {
+        let job = ProgressJobBuilder::new()
+            .body("{{ progress_bar(width=20, hide_complete=true) }}")
+            .progress_current(10)
+            .progress_total(10)
+            .build();
+
+        let ctx = test_render_context(Some((10, 10)));
+        let result = render_template(&job, &ctx);
+
+        // Complete with hide_complete=true should be empty
+        assert_eq!(result, "");
+    }
 }
