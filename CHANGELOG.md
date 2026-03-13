@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1](https://github.com/jdx/clx/compare/v1.3.0...v1.3.1) - 2026-03-13
+
+### Fixed
+
+- *(deps)* update rust crate strum to 0.28 ([#70](https://github.com/jdx/clx/pull/70))
+
+### Other
+
+- *(deps)* lock file maintenance ([#73](https://github.com/jdx/clx/pull/73))
+- *(deps)* lock file maintenance ([#72](https://github.com/jdx/clx/pull/72))
+
 ## [1.3.0](https://github.com/jdx/clx/compare/v1.2.0...v1.3.0) - 2026-01-31
 
 ### Added
