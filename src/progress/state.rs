@@ -236,7 +236,7 @@ fn start() {
     let mut started = STARTED.lock().unwrap();
     if *started
         || is_disabled()
-        || output() == ProgressOutput::Text
+        || matches!(output(), ProgressOutput::Text | ProgressOutput::Quiet)
         || STOPPING.load(Ordering::Relaxed)
     {
         return;
