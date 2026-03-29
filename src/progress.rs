@@ -416,6 +416,9 @@ impl ProgressJob {
         if STOPPING.load(Ordering::Relaxed) {
             return;
         }
+        if output() == ProgressOutput::Quiet {
+            return;
+        }
         if output() == ProgressOutput::Text {
             let update = || {
                 let mut ctx = RenderContext {
@@ -451,7 +454,7 @@ impl ProgressJob {
     }
 
     pub fn println(&self, s: &str) {
-        if !s.is_empty() {
+        if !s.is_empty() && output() != ProgressOutput::Quiet {
             pause();
             // Safety check: ensure no flex tags are visible
             let output = if s.contains("<clx:flex>") {
@@ -587,7 +590,10 @@ pub fn flush() {
 
 fn start() {
     let mut started = STARTED.lock().unwrap();
-    if *started || output() == ProgressOutput::Text || STOPPING.load(Ordering::Relaxed) {
+    if *started
+        || matches!(output(), ProgressOutput::Text | ProgressOutput::Quiet)
+        || STOPPING.load(Ordering::Relaxed)
+    {
         return; // prevent multiple loops running at a time
     }
     // Mark as started BEFORE spawning to avoid a race that can start two loops
@@ -713,6 +719,9 @@ fn refresh() -> Result<bool> {
 }
 
 fn refresh_once() -> Result<()> {
+    if output() == ProgressOutput::Quiet {
+        return Ok(());
+    }
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
     let mut tera = TERA.lock().unwrap();
     if tera.is_none() {
@@ -1170,6 +1179,8 @@ fn add_tera_template(tera: &mut Tera, name: &str, body: &str) -> Result<()> {
 pub enum ProgressOutput {
     UI,
     Text,
+    /// Suppresses all progress output. No spinners, status lines, or text-mode updates.
+    Quiet,
 }
 
 static OUTPUT: Mutex<ProgressOutput> = Mutex::new(ProgressOutput::UI);
