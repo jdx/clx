@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/jdx/clx/compare/v1.3.0...v2.0.0) - 2026-04-16
+
+### Added
+
+- *(progress)* add ProgressOutput::Quiet variant to suppress all progress output ([#80](https://github.com/jdx/clx/pull/80))
+
+### Fixed
+
+- *(deps)* update rust crate strum to 0.28 ([#70](https://github.com/jdx/clx/pull/70))
+
+### Other
+
+- *(deps)* lock file maintenance ([#83](https://github.com/jdx/clx/pull/83))
+- *(deps)* lock file maintenance ([#82](https://github.com/jdx/clx/pull/82))
+- *(deps)* lock file maintenance ([#81](https://github.com/jdx/clx/pull/81))
+- *(deps)* lock file maintenance ([#76](https://github.com/jdx/clx/pull/76))
+- *(deps)* lock file maintenance ([#73](https://github.com/jdx/clx/pull/73))
+- *(deps)* lock file maintenance ([#72](https://github.com/jdx/clx/pull/72))
+
 ## [1.3.0](https://github.com/jdx/clx/compare/v1.2.0...v1.3.0) - 2026-01-31
 
 ### Added
