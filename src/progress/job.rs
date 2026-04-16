@@ -533,7 +533,7 @@ impl ProgressJob {
 
     /// Triggers a display update for this job.
     pub fn update(&self) {
-        if is_disabled() || STOPPING.load(Ordering::Relaxed) {
+        if is_disabled() || STOPPING.load(Ordering::Relaxed) || output() == ProgressOutput::Quiet {
             return;
         }
         if output() == ProgressOutput::Text {
@@ -547,7 +547,7 @@ impl ProgressJob {
 
     /// Prints a line to stderr without interfering with the progress display.
     pub fn println(&self, s: &str) {
-        if !s.is_empty() {
+        if !s.is_empty() && output() != ProgressOutput::Quiet {
             super::state::pause();
             let output = if s.contains("<clx:flex>") {
                 flex(s, term().size().1 as usize)

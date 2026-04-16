@@ -10,6 +10,7 @@ use crate::Result;
 use super::diagnostics;
 use super::flex::flex;
 use super::job::ProgressJob;
+use super::output::{ProgressOutput, output};
 use super::state::{
     JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, TERA, TERM_LOCK,
     is_disabled, is_paused, term, update_osc_progress,
@@ -184,7 +185,7 @@ pub fn refresh() -> Result<bool> {
 
 /// Performs one refresh cycle without loop control.
 pub fn refresh_once() -> Result<()> {
-    if is_disabled() {
+    if is_disabled() || output() == ProgressOutput::Quiet {
         return Ok(());
     }
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
