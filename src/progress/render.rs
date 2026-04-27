@@ -343,8 +343,10 @@ mod tests {
         set_output(original);
 
         assert!(result.is_ok());
-        assert_eq!(lines_after, 1,
-            "write_frame() must not run in Text mode; LINES should be unchanged");
+        assert_eq!(
+            lines_after, 1,
+            "write_frame() must not run in Text mode; LINES should be unchanged"
+        );
     }
 
     #[test]
