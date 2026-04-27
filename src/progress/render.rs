@@ -336,13 +336,15 @@ mod tests {
         *LINES.lock().unwrap() = 1; // simulate a previous frame
 
         let result = refresh_once();
+        let lines_after = *LINES.lock().unwrap();
 
-        assert!(result.is_ok());
-        assert_eq!(*LINES.lock().unwrap(), 1,
-            "write_frame() must not run in Text mode; LINES should be unchanged");
-
+        // Clean up before asserting so global state is always restored on panic
         *LINES.lock().unwrap() = 0;
         set_output(original);
+
+        assert!(result.is_ok());
+        assert_eq!(lines_after, 1,
+            "write_frame() must not run in Text mode; LINES should be unchanged");
     }
 
     #[test]
