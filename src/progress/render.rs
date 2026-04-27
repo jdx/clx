@@ -327,6 +327,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_refresh_once_skips_text_mode() {
+        use super::super::output::{ProgressOutput, output, set_output};
+        use super::super::state::LINES;
+
+        let original = output();
+        set_output(ProgressOutput::Text);
+        *LINES.lock().unwrap() = 1; // simulate a previous frame
+
+        let result = refresh_once();
+
+        assert!(result.is_ok());
+        assert_eq!(*LINES.lock().unwrap(), 1,
+            "write_frame() must not run in Text mode; LINES should be unchanged");
+
+        *LINES.lock().unwrap() = 0;
+        set_output(original);
+    }
+
+    #[test]
     fn test_indent() {
         let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let result = indent(s.to_string(), 10, 2);
