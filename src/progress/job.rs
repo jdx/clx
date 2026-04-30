@@ -169,6 +169,7 @@ impl ProgressJobBuilder {
             operations_total: Mutex::new(None),
             operation_index: Mutex::new(0),
             operation_start: Mutex::new(Instant::now()),
+            last_text_output: Mutex::new(None),
         }
     }
 
@@ -205,6 +206,9 @@ pub struct ProgressJob {
     pub(crate) operation_index: Mutex<usize>,
     /// Start time of the current operation (for ETA calculation after next_operation)
     pub(crate) operation_start: Mutex<Instant>,
+    /// Last rendered text-mode line. Used to suppress consecutive identical
+    /// emissions when multiple props are updated in quick succession.
+    pub(crate) last_text_output: Mutex<Option<String>>,
 }
 
 impl ProgressJob {
