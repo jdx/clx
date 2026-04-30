@@ -285,6 +285,37 @@ pub fn add_tera_template(tera: &mut Tera, name: &str, body: &str) -> Result<()> 
     Ok(())
 }
 
+/// Default cap on rendered text-mode output. A user-supplied template can
+/// produce arbitrarily large content (e.g. a multi-line shell script
+/// embedded in a `check =` value, or a generated command with hundreds
+/// of args expanded inline) and text mode prints each render verbatim.
+/// 4096 chars covers any realistic diagnostic while bounding the
+/// pathological case. Override with `CLX_TEXT_MAX_LEN`.
+const DEFAULT_TEXT_MODE_MAX_LEN: usize = 4096;
+
+/// Resolve the text-mode line cap from the env, falling back to the default.
+/// `CLX_TEXT_MAX_LEN=0` (or any unparseable value) disables truncation.
+fn text_mode_max_len() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("CLX_TEXT_MAX_LEN")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_TEXT_MODE_MAX_LEN)
+    })
+}
+
+/// Truncate text-mode output to `max_len` printable characters with a
+/// trailing `…`, ANSI-aware so escapes don't get split or counted toward
+/// the budget. Returns the input unchanged if it fits, or `max_len == 0`
+/// (the documented escape hatch for "never truncate").
+fn truncate_text_mode_line(s: &str, max_len: usize) -> String {
+    if max_len == 0 || console::measure_text_width(s) <= max_len {
+        return s.to_string();
+    }
+    console::truncate_str(s, max_len, "…").into_owned()
+}
+
 /// Helper to render for text mode output.
 pub fn render_text_mode(job: &ProgressJob) -> Result<()> {
     let mut ctx = RenderContext {
@@ -300,11 +331,14 @@ pub fn render_text_mode(job: &ProgressJob) -> Result<()> {
     let output = job.render(tera, ctx)?;
     if !output.is_empty() {
         // Safety check: ensure no flex tags are visible
-        let final_output = if output.contains("<clx:flex>") {
+        let mut final_output = if output.contains("<clx:flex>") {
             flex(&output, term().size().1 as usize)
         } else {
             output
         };
+        // Cap the rendered line length so a runaway template can't dump
+        // megabytes into the log on every update. See `text_mode_max_len`.
+        final_output = truncate_text_mode_line(&final_output, text_mode_max_len());
         // Skip writing if this job's last text-mode line was identical. Callers
         // often update several props in a row (e.g. `message` then `cur`); each
         // call hits this path, but if the rendered line is unchanged there's no
@@ -325,6 +359,36 @@ pub fn render_text_mode(job: &ProgressJob) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_text_mode_line_passes_short_input() {
+        let s = "hello world";
+        assert_eq!(truncate_text_mode_line(s, 100), "hello world");
+    }
+
+    #[test]
+    fn truncate_text_mode_line_caps_long_input_with_ellipsis() {
+        let s = "a".repeat(50);
+        let out = truncate_text_mode_line(&s, 10);
+        assert_eq!(console::measure_text_width(&out), 10);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_text_mode_line_zero_disables_truncation() {
+        let s = "a".repeat(10_000);
+        assert_eq!(truncate_text_mode_line(&s, 0), s);
+    }
+
+    #[test]
+    fn truncate_text_mode_line_preserves_ansi_escapes() {
+        // Prefix with a color escape, then a long run of plain text; the
+        // truncate should be ANSI-aware so the printable width is the cap,
+        // not the byte length.
+        let s = format!("\x1b[31m{}\x1b[0m", "a".repeat(50));
+        let out = truncate_text_mode_line(&s, 10);
+        assert_eq!(console::measure_text_width(&out), 10);
+    }
 
     #[test]
     fn test_indent() {
