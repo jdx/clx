@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1](https://github.com/jdx/clx/compare/v2.0.0...v2.0.1) - 2026-04-30
+
+### Fixed
+
+- *(progress)* suppress UI escape codes and duplicate lines in text mode ([#86](https://github.com/jdx/clx/pull/86))
+
 ## [2.0.0](https://github.com/jdx/clx/compare/v1.3.0...v2.0.0) - 2026-04-16
 
 ### Added
