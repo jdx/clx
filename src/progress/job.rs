@@ -169,6 +169,7 @@ impl ProgressJobBuilder {
             operations_total: Mutex::new(None),
             operation_index: Mutex::new(0),
             operation_start: Mutex::new(Instant::now()),
+            last_text_output: Mutex::new(None),
         }
     }
 
@@ -205,6 +206,9 @@ pub struct ProgressJob {
     pub(crate) operation_index: Mutex<usize>,
     /// Start time of the current operation (for ETA calculation after next_operation)
     pub(crate) operation_start: Mutex<Instant>,
+    /// Last rendered text-mode line. Used to suppress consecutive identical
+    /// emissions when multiple props are updated in quick succession.
+    pub(crate) last_text_output: Mutex<Option<String>>,
 }
 
 impl ProgressJob {
@@ -440,6 +444,14 @@ impl ProgressJob {
 
         // Advance operation index after clearing progress values
         *self.operation_index.lock().unwrap() += 1;
+
+        // Clear the text-mode dedup cache so the first render of the new
+        // operation always reaches the wire, even if the rendered template
+        // happens to be byte-identical to the last line of the previous
+        // operation (e.g. a body that only shows `message` and message
+        // hasn't changed yet). Without this, the state-change event would
+        // be silently swallowed in CI logs.
+        *self.last_text_output.lock().unwrap() = None;
 
         self.update();
     }

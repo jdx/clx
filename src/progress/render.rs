@@ -184,8 +184,13 @@ pub fn refresh() -> Result<bool> {
 }
 
 /// Performs one refresh cycle without loop control.
+///
+/// In `ProgressOutput::Text` mode this is a no-op: text mode emits a fresh
+/// line for each job update, so a full-frame redraw would only repeat content
+/// already on the wire (and emit cursor-movement escape codes that look like
+/// garbage in non-TTY logs such as CI).
 pub fn refresh_once() -> Result<()> {
-    if is_disabled() || output() == ProgressOutput::Quiet {
+    if is_disabled() || matches!(output(), ProgressOutput::Quiet | ProgressOutput::Text) {
         return Ok(());
     }
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
@@ -300,6 +305,16 @@ pub fn render_text_mode(job: &ProgressJob) -> Result<()> {
         } else {
             output
         };
+        // Skip writing if this job's last text-mode line was identical. Callers
+        // often update several props in a row (e.g. `message` then `cur`); each
+        // call hits this path, but if the rendered line is unchanged there's no
+        // information to add — emitting it again just makes CI logs noisier.
+        let mut last = job.last_text_output.lock().unwrap();
+        if last.as_deref() == Some(final_output.as_str()) {
+            return Ok(());
+        }
+        *last = Some(final_output.clone());
+        drop(last);
         let _guard = TERM_LOCK.lock().unwrap();
         term().write_line(&final_output)?;
         drop(_guard);
