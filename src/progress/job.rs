@@ -445,6 +445,14 @@ impl ProgressJob {
         // Advance operation index after clearing progress values
         *self.operation_index.lock().unwrap() += 1;
 
+        // Clear the text-mode dedup cache so the first render of the new
+        // operation always reaches the wire, even if the rendered template
+        // happens to be byte-identical to the last line of the previous
+        // operation (e.g. a body that only shows `message` and message
+        // hasn't changed yet). Without this, the state-change event would
+        // be silently swallowed in CI logs.
+        *self.last_text_output.lock().unwrap() = None;
+
         self.update();
     }
 
