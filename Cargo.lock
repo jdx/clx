@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "clx"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "console",
  "log",
