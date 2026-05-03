@@ -33,3 +33,6 @@ test-log = "0.2"
 [[example]]
 name = "log_integration"
 required-features = ["log"]
+
+[profile.dev]
+debug = 1
