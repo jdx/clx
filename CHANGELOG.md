@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.3](https://github.com/jdx/clx/compare/v2.0.2...v2.0.3) - 2026-05-10
+
+### Fixed
+
+- *(progress)* update Tera template when body changes ([#92](https://github.com/jdx/clx/pull/92))
+
 ## [2.0.2](https://github.com/jdx/clx/compare/v2.0.1...v2.0.2) - 2026-05-03
 
 ### Other
