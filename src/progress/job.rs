@@ -170,6 +170,7 @@ impl ProgressJobBuilder {
             operation_index: Mutex::new(0),
             operation_start: Mutex::new(Instant::now()),
             last_text_output: Mutex::new(None),
+            last_compiled_body: Mutex::new(None),
         }
     }
 
@@ -209,6 +210,9 @@ pub struct ProgressJob {
     /// Last rendered text-mode line. Used to suppress consecutive identical
     /// emissions when multiple props are updated in quick succession.
     pub(crate) last_text_output: Mutex<Option<String>>,
+    /// Last compiled Tera template body. Used to skip recompiling when the
+    /// body has not changed since the last render frame.
+    pub(crate) last_compiled_body: Mutex<Option<String>>,
 }
 
 impl ProgressJob {
@@ -236,7 +240,13 @@ impl ProgressJob {
             self.body.lock().unwrap().clone()
         };
         let name = format!("progress_{}", self.id);
-        add_tera_template(tera, &name, &body)?;
+        {
+            let mut last = self.last_compiled_body.lock().unwrap();
+            if last.as_deref() != Some(&body) {
+                add_tera_template(tera, &name, &body)?;
+                *last = Some(body.clone());
+            }
+        }
         let rendered_body = tera.render(&name, &ctx.tera_ctx)?;
         let flex_width = ctx.width.saturating_sub(ctx.indent);
         let body = flex(&rendered_body, flex_width);
