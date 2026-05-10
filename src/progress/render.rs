@@ -277,11 +277,9 @@ pub fn indent(s: String, width: usize, indent_size: usize) -> String {
     result.join("\n")
 }
 
-/// Adds a raw template to the Tera engine if it doesn't already exist.
+/// Adds a raw template to the Tera engine, updating it if it already exists.
 pub fn add_tera_template(tera: &mut Tera, name: &str, body: &str) -> Result<()> {
-    if !tera.get_template_names().any(|n| n == name) {
-        tera.add_raw_template(name, body)?;
-    }
+    tera.add_raw_template(name, body)?;
     Ok(())
 }
 
