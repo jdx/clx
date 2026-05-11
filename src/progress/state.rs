@@ -321,17 +321,27 @@ pub fn active_jobs() -> usize {
     count_active(&JOBS.lock().unwrap())
 }
 
-/// Removes all top-level progress jobs from the registry.
+/// Removes all top-level progress jobs from the registry and re-enables
+/// rendering after [`stop`] / [`stop_clear`].
 ///
-/// Useful after [`stop`] or [`stop_clear`] when you're starting a fresh
-/// session: those functions stop rendering and (for `stop_clear`) clear the
-/// display, but they leave completed jobs registered. A later call to add
-/// a new job would otherwise re-render the stale jobs alongside the new one.
+/// `stop` and `stop_clear` set the internal `STOPPING` flag, which makes
+/// subsequent `update()` calls (and the background thread) no-op forever.
+/// On its own this would mean a new job added after `stop` doesn't animate
+/// — only its final terminal-state flush would render. `clear_jobs` resets
+/// `STOPPING` alongside dropping the registered jobs so the documented
+/// "start a fresh session" workflow actually works:
 ///
-/// This does not affect the terminal display — call [`stop_clear`] first if
+/// ```ignore
+/// progress::stop();        // end session, jobs stay registered
+/// progress::clear_jobs();  // drop them and re-arm rendering
+/// let job = ProgressJobBuilder::new().start(); // new session renders normally
+/// ```
+///
+/// This does not touch the terminal display — call [`stop_clear`] first if
 /// you also want to clear the rendered output.
 pub fn clear_jobs() {
     JOBS.lock().unwrap().clear();
+    STOPPING.store(false, Ordering::Relaxed);
 }
 
 // =============================================================================

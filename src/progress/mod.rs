@@ -874,4 +874,20 @@ mod tests {
         assert_eq!(job_count(), 1);
         clear_jobs();
     }
+
+    #[test]
+    fn test_clear_jobs_rearms_rendering_after_stop() {
+        use std::sync::atomic::Ordering;
+        // Drive into the "stopped" state and confirm STOPPING is latched.
+        let job = ProgressJobBuilder::new().prop("message", "a").start();
+        job.set_status(ProgressStatus::Done);
+        stop();
+        assert!(state::STOPPING.load(Ordering::Relaxed));
+
+        // clear_jobs must both drop registered jobs and reset STOPPING so a
+        // subsequent session can actually drive updates again.
+        clear_jobs();
+        assert_eq!(job_count(), 0);
+        assert!(!state::STOPPING.load(Ordering::Relaxed));
+    }
 }
