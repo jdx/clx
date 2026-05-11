@@ -321,6 +321,19 @@ pub fn active_jobs() -> usize {
     count_active(&JOBS.lock().unwrap())
 }
 
+/// Removes all top-level progress jobs from the registry.
+///
+/// Useful after [`stop`] or [`stop_clear`] when you're starting a fresh
+/// session: those functions stop rendering and (for `stop_clear`) clear the
+/// display, but they leave completed jobs registered. A later call to add
+/// a new job would otherwise re-render the stale jobs alongside the new one.
+///
+/// This does not affect the terminal display — call [`stop_clear`] first if
+/// you also want to clear the rendered output.
+pub fn clear_jobs() {
+    JOBS.lock().unwrap().clear();
+}
+
 // =============================================================================
 // Clear Display
 // =============================================================================

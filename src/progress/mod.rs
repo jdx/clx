@@ -342,8 +342,8 @@ mod log;
 pub use job::{ProgressJob, ProgressJobBuilder, ProgressJobDoneBehavior, ProgressStatus};
 pub use output::{ProgressOutput, output, set_output};
 pub use state::{
-    active_jobs, flush, interval, is_disabled, is_paused, job_count, pause, resume, set_interval,
-    stop, stop_clear, with_terminal_lock,
+    active_jobs, clear_jobs, flush, interval, is_disabled, is_paused, job_count, pause, resume,
+    set_interval, stop, stop_clear, with_terminal_lock,
 };
 
 #[cfg(feature = "log")]
@@ -858,5 +858,20 @@ mod tests {
 
         job.remove();
         assert_eq!(job_count(), initial_count);
+    }
+
+    #[test]
+    fn test_clear_jobs() {
+        let _j1 = ProgressJobBuilder::new().prop("message", "a").start();
+        let _j2 = ProgressJobBuilder::new().prop("message", "b").start();
+        assert!(job_count() >= 2);
+
+        clear_jobs();
+        assert_eq!(job_count(), 0);
+
+        // A subsequent job starts fresh
+        let _j3 = ProgressJobBuilder::new().prop("message", "c").start();
+        assert_eq!(job_count(), 1);
+        clear_jobs();
     }
 }
