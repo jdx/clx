@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/jdx/clx/compare/v2.0.3...v2.1.0) - 2026-05-11
+
+### Added
+
+- *(progress)* add clear_jobs() to remove all top-level jobs ([#94](https://github.com/jdx/clx/pull/94))
+
 ## [2.0.3](https://github.com/jdx/clx/compare/v2.0.2...v2.0.3) - 2026-05-10
 
 ### Fixed
