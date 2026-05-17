@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn test_progress_state_clone() {
         let state = ProgressState::Normal;
-        let cloned = state.clone();
+        let cloned = state;
         assert_eq!(state, cloned);
     }
 

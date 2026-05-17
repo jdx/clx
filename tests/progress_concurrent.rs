@@ -157,6 +157,7 @@ fn test_terminal_lock_contention() {
             let job = Arc::clone(&job_arc);
             thread::spawn(move || {
                 for j in 0..20 {
+                    #[allow(clippy::let_unit_value)]
                     let _ = with_terminal_lock(|| {
                         // Simulate some work while holding the lock
                         let _ = &format!("Thread {} iteration {}", i, j);
@@ -262,7 +263,7 @@ fn test_concurrent_println() {
             let job = Arc::clone(&job_arc);
             thread::spawn(move || {
                 for j in 0..10 {
-                    job.println(&&format!("Thread {} message {}", i, j));
+                    job.println(&format!("Thread {} message {}", i, j));
                     thread::yield_now();
                 }
             })

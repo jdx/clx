@@ -125,7 +125,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
             let rows = if term_width == 0 {
                 1
             } else {
-                (visible_width - 1) / term_width + 1
+                (visible_width - 1).checked_div(term_width).unwrap_or(0) + 1
             };
             consumed_rows += rows.max(1);
         }

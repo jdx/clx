@@ -14,7 +14,9 @@ use super::flex::flex;
 use super::output::{ProgressOutput, output};
 use super::render::{RenderContext, add_tera_template, indent, render_text_mode};
 use super::spinners::DEFAULT_BODY;
-use super::state::{JOBS, STOPPING, TERM_LOCK, is_disabled, notify, term};
+use super::state::{
+    JOBS, LAST_OUTPUT, REFRESH_LOCK, STOPPING, TERM_LOCK, is_disabled, notify, term,
+};
 use super::tera_setup::add_tera_functions;
 
 /// Status of a progress job.
@@ -569,17 +571,48 @@ impl ProgressJob {
 
     /// Prints a line to stderr without interfering with the progress display.
     pub fn println(&self, s: &str) {
-        if !s.is_empty() && output() != ProgressOutput::Quiet {
-            super::state::pause();
-            let output = if s.contains("<clx:flex>") {
-                flex(s, term().size().1 as usize)
-            } else {
-                s.to_string()
-            };
+        if s.is_empty() || output() == ProgressOutput::Quiet {
+            return;
+        }
+
+        let line = if s.contains("<clx:flex>") {
+            flex(s, term().size().1 as usize)
+        } else {
+            s.to_string()
+        };
+
+        // In text mode, just emit the line — no frame to manage.
+        if output() == ProgressOutput::Text {
             let _guard = TERM_LOCK.lock().unwrap();
-            let _ = term().write_line(&output);
-            drop(_guard);
-            super::state::resume();
+            let _ = term().write_line(&line);
+            return;
+        }
+
+        // In TTY mode, pause the progress display, print the line, then
+        // redraw the frame below it.  Hold REFRESH_LOCK throughout so the
+        // background render thread cannot interleave a write_frame().
+        let _refresh_guard = REFRESH_LOCK.lock().unwrap();
+
+        super::state::pause();
+        {
+            let _guard = TERM_LOCK.lock().unwrap();
+            let _ = term().write_line(&line);
+        }
+        super::state::resume();
+
+        // Redraw the frame below the log line.
+        // Skip if the background thread has exited (STARTED=false): in that
+        // case pause() did not clear() so LINES is stale, and calling
+        // write_frame() would move the cursor to the wrong position.
+        if !*super::state::STARTED.lock().unwrap() {
+            return;
+        }
+        // Inline render + write_frame (refresh_once() would deadlock on REFRESH_LOCK).
+        // If rendering fails the log line is already on screen — best-effort redraw.
+        if let Ok(frame) = super::render::render_frame() {
+            let final_output = super::render::process_flex_output(&frame.output);
+            *LAST_OUTPUT.lock().unwrap() = final_output.clone();
+            let _ = super::render::write_frame(&final_output, &frame.jobs);
         }
     }
 }
