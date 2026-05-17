@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1](https://github.com/jdx/clx/compare/v2.1.0...v2.1.1) - 2026-05-17
+
+### Fixed
+
+- *(progress)* prevent frame duplication in println() ([#96](https://github.com/jdx/clx/pull/96))
+
 ## [2.1.0](https://github.com/jdx/clx/compare/v2.0.3...v2.1.0) - 2026-05-11
 
 ### Added
