@@ -204,6 +204,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_style_with_different_types() {
         // Test with different input types
         assert!(ecyan(42).to_string().contains("42"));
