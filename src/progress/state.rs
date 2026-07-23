@@ -5,7 +5,7 @@
 //! refresh thread.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -57,6 +57,68 @@ pub(crate) static LINES: Mutex<usize> = Mutex::new(0);
 
 /// Global terminal lock for synchronizing output operations.
 pub static TERM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// DEC private mode 2026 (synchronized output). A terminal that implements the
+/// mode buffers everything between these and presents it as one frame. One that
+/// does not ignores the unknown private mode. We emit unconditionally rather
+/// than probing for support, matching Homebrew/brew#23264.
+const BEGIN_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026h";
+const END_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026l";
+
+/// Nesting depth of open synchronized updates. Mode 2026 is a set/reset flag,
+/// not a counter, so a nested reset would end the outer update early: only the
+/// outermost guard emits. Mutated only while `TERM_LOCK` is held.
+static SYNC_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+fn emit_synchronized_updates() -> bool {
+    !is_disabled() && output() == ProgressOutput::UI
+}
+
+/// RAII guard that brackets an in-place redraw in a synchronized update so a
+/// fast terminal cannot present a half-drawn frame between the individual
+/// cursor-movement and write operations.
+#[must_use = "the update ends when this guard drops, so it must be bound for the redraw it protects"]
+pub(crate) struct SyncUpdate {
+    locks: bool,
+    emitted_begin: bool,
+}
+
+impl SyncUpdate {
+    /// Begins a synchronized update for a caller that already holds `TERM_LOCK`.
+    pub(crate) fn begin() -> Self {
+        Self::enter(false)
+    }
+
+    /// Begins a synchronized update, briefly taking `TERM_LOCK` around each
+    /// emission for a caller that does not already hold it (e.g. a span across
+    /// several separately-locked writes).
+    pub(crate) fn begin_locking() -> Self {
+        Self::enter(true)
+    }
+
+    fn enter(locks: bool) -> Self {
+        let _guard = locks.then(|| TERM_LOCK.lock().unwrap());
+        let is_outermost = SYNC_DEPTH.fetch_add(1, Ordering::SeqCst) == 0;
+        let emitted_begin = is_outermost && emit_synchronized_updates();
+        if emitted_begin {
+            let _ = term().write_str(BEGIN_SYNCHRONIZED_UPDATE);
+        }
+        Self {
+            locks,
+            emitted_begin,
+        }
+    }
+}
+
+impl Drop for SyncUpdate {
+    fn drop(&mut self) {
+        let _guard = self.locks.then(|| TERM_LOCK.lock().unwrap());
+        SYNC_DEPTH.fetch_sub(1, Ordering::SeqCst);
+        if self.emitted_begin {
+            let _ = term().write_str(END_SYNCHRONIZED_UPDATE);
+        }
+    }
+}
 
 /// Lock to ensure only one refresh cycle runs at a time.
 pub(crate) static REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -354,9 +416,11 @@ pub(crate) fn clear() -> crate::Result<()> {
     let mut lines = LINES.lock().unwrap();
     if *lines > 0 {
         let _guard = TERM_LOCK.lock().unwrap();
+        let _sync = SyncUpdate::begin();
         term.move_cursor_up(*lines)?;
         term.move_cursor_left(term.size().1 as usize)?;
         term.clear_to_end_of_screen()?;
+        drop(_sync);
         drop(_guard);
     }
     *lines = 0;
