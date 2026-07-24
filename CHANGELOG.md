@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1](https://github.com/jdx/clx/compare/v2.1.0...v2.1.1) - 2026-07-24
+
+### Fixed
+
+- *(progress)* wrap in-place redraws in synchronized updates ([#101](https://github.com/jdx/clx/pull/101))
+- *(progress)* prevent frame duplication in println() ([#96](https://github.com/jdx/clx/pull/96))
+
+### Other
+
+- *(deps)* lock file maintenance ([#91](https://github.com/jdx/clx/pull/91))
+- raise MSRV to Rust 1.88 ([#99](https://github.com/jdx/clx/pull/99))
+
 ## [2.1.0](https://github.com/jdx/clx/compare/v2.0.3...v2.1.0) - 2026-05-11
 
 ### Added
