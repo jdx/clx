@@ -146,7 +146,7 @@ impl ProgressJobBuilder {
 
     /// Sets a template property (variable).
     pub fn prop<T: SerializeTrait + ?Sized, S: Into<String>>(mut self, key: S, val: &T) -> Self {
-        self.ctx.insert(key, val);
+        self.ctx.insert(key.into(), val);
         self
     }
 
@@ -338,7 +338,7 @@ impl ProgressJob {
     /// Sets a template property (variable).
     pub fn prop<T: SerializeTrait + ?Sized, S: Into<String>>(&self, key: S, val: &T) {
         let mut ctx = self.tera_ctx.lock().unwrap();
-        ctx.insert(key, val);
+        ctx.insert(key.into(), val);
         drop(ctx);
         self.update();
     }
