@@ -15,7 +15,7 @@ use super::output::{ProgressOutput, output};
 use super::render::{RenderContext, add_tera_template, indent, render_text_mode};
 use super::spinners::DEFAULT_BODY;
 use super::state::{
-    JOBS, LAST_OUTPUT, REFRESH_LOCK, STOPPING, TERM_LOCK, is_disabled, notify, term,
+    JOBS, LAST_OUTPUT, REFRESH_LOCK, STOPPING, SyncUpdate, TERM_LOCK, is_disabled, notify, term,
 };
 use super::tera_setup::add_tera_functions;
 
@@ -592,6 +592,7 @@ impl ProgressJob {
         // redraw the frame below it.  Hold REFRESH_LOCK throughout so the
         // background render thread cannot interleave a write_frame().
         let _refresh_guard = REFRESH_LOCK.lock().unwrap();
+        let _sync = SyncUpdate::begin_locking();
 
         super::state::pause();
         {

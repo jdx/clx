@@ -12,8 +12,8 @@ use super::flex::flex;
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
 use super::state::{
-    JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, TERA, TERM_LOCK,
-    is_disabled, is_paused, term, update_osc_progress,
+    JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, SyncUpdate, TERA,
+    TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
 };
 
 /// Context for rendering a frame.
@@ -105,6 +105,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
     let mut lines = LINES.lock().unwrap();
 
     let _guard = TERM_LOCK.lock().unwrap();
+    let _sync = SyncUpdate::begin();
 
     // Clear previous frame
     if *lines > 0 {
