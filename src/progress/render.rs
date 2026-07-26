@@ -12,8 +12,8 @@ use super::flex::flex;
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
 use super::state::{
-    JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, SyncUpdate, TERA,
-    TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
+    JOBS, LAST_FRAME, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, SyncUpdate,
+    TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
 };
 
 /// Context for rendering a frame.
@@ -103,13 +103,18 @@ pub(crate) fn process_flex_output(output: &str) -> String {
 pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
+    let mut last_frame = LAST_FRAME.lock().unwrap();
 
     let _guard = TERM_LOCK.lock().unwrap();
     let _sync = SyncUpdate::begin();
 
-    // Clear previous frame
-    if *lines > 0 {
-        term.move_cursor_up(*lines)?;
+    // Recalculate the previous frame's physical height at the current width.
+    // A terminal resize reflows existing text, so the row count recorded when
+    // the frame was written can point at the wrong starting row.
+    let term_width = term.size().1 as usize;
+    let previous_height = rendered_height(&last_frame, term_width);
+    if previous_height > 0 {
+        term.move_cursor_up(previous_height)?;
         term.move_cursor_left(term.size().1 as usize)?;
         term.clear_to_end_of_screen()?;
     }
@@ -119,23 +124,28 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
         term.write_line(output)?;
 
         // Count how many terminal rows were consumed, accounting for wrapping
-        let term_width = term.size().1 as usize;
-        let mut consumed_rows = 0usize;
-        for line in output.lines() {
-            let visible_width = console::measure_text_width(line).max(1);
-            let rows = if term_width == 0 {
-                1
-            } else {
-                (visible_width - 1).checked_div(term_width).unwrap_or(0) + 1
-            };
-            consumed_rows += rows.max(1);
-        }
-        *lines = consumed_rows.max(1);
+        *lines = rendered_height(output, term_width).max(1);
+        *last_frame = output.to_string();
     } else {
         *lines = 0;
+        last_frame.clear();
     }
 
     Ok(())
+}
+
+pub(crate) fn rendered_height(output: &str, width: usize) -> usize {
+    output
+        .lines()
+        .map(|line| {
+            let visible_width = console::measure_text_width(line).max(1);
+            if width == 0 {
+                1
+            } else {
+                (visible_width - 1).checked_div(width).unwrap_or(0) + 1
+            }
+        })
+        .sum()
 }
 
 /// Performs one refresh cycle of the progress display.
@@ -340,5 +350,20 @@ mod tests {
             result,
             "  \x1b[0;31maaaaaaaa\n  \x1b[0;31maaaaaaaa\n  \x1b[0;31maaaaaaaa\n  \x1b[0;31maaaaaaaa\n  \x1b[0;31maa"
         );
+    }
+
+    #[test]
+    fn rendered_height_tracks_terminal_reflow() {
+        let output = "x".repeat(60);
+
+        assert_eq!(rendered_height(&output, 20), 3);
+        assert_eq!(rendered_height(&output, 80), 1);
+    }
+
+    #[test]
+    fn rendered_height_ignores_ansi_width() {
+        let output = format!("\x1b[31m{}\x1b[0m", "x".repeat(20));
+
+        assert_eq!(rendered_height(&output, 20), 1);
     }
 }
