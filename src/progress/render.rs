@@ -147,7 +147,10 @@ pub(crate) fn process_flex_output(output: &str) -> String {
 }
 
 /// Writes a rendered frame to the terminal.
-pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()> {
+///
+/// Returns `true` when the frame was written and `false` when a resize guard
+/// deferred it.
+pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<bool> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
     let mut last_frame = LAST_FRAME.lock().unwrap();
@@ -165,7 +168,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
         any_running,
         Instant::now(),
     ) {
-        return Ok(());
+        return Ok(false);
     }
     let (term_height, term_width) = term_size;
     let term_height = term_height as usize;
@@ -178,7 +181,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
     // viewport is tall enough to address it again. Terminal states still get
     // one best-effort final render so completed status is not lost.
     if any_running && previous_height >= term_height {
-        return Ok(());
+        return Ok(false);
     }
     let _sync = SyncUpdate::begin();
     if previous_height > 0 {
@@ -199,7 +202,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
         last_frame.clear();
     }
 
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn rendered_height(output: &str, width: usize) -> usize {
@@ -214,6 +217,12 @@ pub(crate) fn rendered_height(output: &str, width: usize) -> usize {
             }
         })
         .sum()
+}
+
+fn cache_written_output(last_output: &mut String, output: &str, written: bool) {
+    if written {
+        output.clone_into(last_output);
+    }
 }
 
 /// Performs one refresh cycle of the progress display.
@@ -240,7 +249,7 @@ pub fn refresh() -> Result<bool> {
     let final_output = process_flex_output(&frame.output);
 
     // Smart refresh: skip terminal write if output unchanged and no spinners animating
-    let mut last_output = LAST_OUTPUT.lock().unwrap();
+    let last_output = LAST_OUTPUT.lock().unwrap();
     let lines = *LINES.lock().unwrap();
     if !any_running && final_output == *last_output && lines > 0 {
         drop(last_output);
@@ -250,10 +259,10 @@ pub fn refresh() -> Result<bool> {
         }
         return Ok(true);
     }
-    *last_output = final_output.clone();
     drop(last_output);
 
-    write_frame(&final_output, &frame.jobs)?;
+    let written = write_frame(&final_output, &frame.jobs)?;
+    cache_written_output(&mut LAST_OUTPUT.lock().unwrap(), &final_output, written);
 
     if !any_running && !any_running_check() {
         *STARTED.lock().unwrap() = false;
@@ -441,6 +450,17 @@ mod tests {
         assert_eq!(render_width(2), 1);
         assert_eq!(render_width(1), 1);
         assert_eq!(render_width(0), 1);
+    }
+
+    #[test]
+    fn deferred_frame_does_not_advance_output_cache() {
+        let mut last_output = "visible frame".to_string();
+
+        cache_written_output(&mut last_output, "deferred frame", false);
+        assert_eq!(last_output, "visible frame");
+
+        cache_written_output(&mut last_output, "written frame", true);
+        assert_eq!(last_output, "written frame");
     }
 
     #[test]
