@@ -64,6 +64,8 @@ pub static TERM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 /// than probing for support, matching Homebrew/brew#23264.
 const BEGIN_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026h";
 const END_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026l";
+pub(crate) const SAVE_CURSOR_POSITION: &str = "\x1b[s";
+pub(crate) const RESTORE_CURSOR_POSITION: &str = "\x1b[u";
 
 /// Nesting depth of open synchronized updates. Mode 2026 is a set/reset flag,
 /// not a counter, so a nested reset would end the outer update early: only the
@@ -423,6 +425,7 @@ pub(crate) fn clear() -> crate::Result<()> {
     let _guard = TERM_LOCK.lock().unwrap();
     let _sync = SyncUpdate::begin();
     if *lines > 0 {
+        term.write_str(RESTORE_CURSOR_POSITION)?;
         term.clear_to_end_of_screen()?;
     }
     term.show_cursor()?;
@@ -438,8 +441,6 @@ pub(crate) fn finish_frame() -> crate::Result<()> {
     if *lines > 0 {
         let _guard = TERM_LOCK.lock().unwrap();
         let _sync = SyncUpdate::begin();
-        term.move_cursor_down(*lines)?;
-        term.move_cursor_left(term.size().1 as usize)?;
         term.show_cursor()?;
     }
     *lines = 0;

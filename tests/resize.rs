@@ -10,6 +10,8 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 const BEGIN: &[u8] = b"\x1b[?2026h";
 const END: &[u8] = b"\x1b[?2026l";
+const SAVE_CURSOR: &[u8] = b"\x1b[s";
+const RESTORE_CURSOR: &[u8] = b"\x1b[u";
 
 #[test]
 fn resize_child_scenario() {
@@ -80,6 +82,12 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
             "did not redraw at {cols} columns: {}",
             String::from_utf8_lossy(&resized).escape_debug()
         );
+        let frame = first_frame(&resized).unwrap_or(&resized);
+        assert!(
+            contains(frame, RESTORE_CURSOR) && contains(frame, SAVE_CURSOR),
+            "redraw did not restore and refresh the saved origin: {}",
+            String::from_utf8_lossy(frame).escape_debug()
+        );
     }
 
     // A frame that fills the viewport would scroll its anchored first row into
@@ -142,10 +150,9 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
     reader_thread.join().expect("join reader");
 
     let frame = first_frame(&resized).unwrap_or(&resized);
-    assert_eq!(
-        cursor_up_amount(frame),
-        Some(1),
-        "redraw did not return the cursor to the frame anchor: {}",
+    assert!(
+        contains(frame, SAVE_CURSOR),
+        "recovered frame did not save its new origin: {}",
         String::from_utf8_lossy(frame).escape_debug()
     );
 }
@@ -178,19 +185,10 @@ fn first_frame(output: &[u8]) -> Option<&[u8]> {
     Some(&rest[..end])
 }
 
-fn cursor_up_amount(frame: &[u8]) -> Option<usize> {
-    frame.windows(2).enumerate().find_map(|(index, window)| {
-        if window != b"\x1b[" {
-            return None;
-        }
-        let digits = &frame[index + 2..];
-        let end = digits.iter().position(|byte| *byte == b'A')?;
-        if digits[..end].iter().all(u8::is_ascii_digit) {
-            std::str::from_utf8(&digits[..end]).ok()?.parse().ok()
-        } else {
-            None
-        }
-    })
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {

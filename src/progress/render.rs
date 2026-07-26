@@ -12,8 +12,9 @@ use super::flex::flex;
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
 use super::state::{
-    CRAMPED_VIEWPORT, JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING,
-    SyncUpdate, TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
+    CRAMPED_VIEWPORT, JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, RESTORE_CURSOR_POSITION,
+    SAVE_CURSOR_POSITION, STARTED, STOPPING, SyncUpdate, TERA, TERM_LOCK, is_disabled, is_paused,
+    term, update_osc_progress,
 };
 
 /// Context for rendering a frame.
@@ -137,20 +138,20 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     CRAMPED_VIEWPORT.store(false, std::sync::atomic::Ordering::Relaxed);
     let _sync = SyncUpdate::begin();
     if *lines > 0 {
+        term.write_str(RESTORE_CURSOR_POSITION)?;
         term.clear_to_end_of_screen()?;
     }
 
     if !output.is_empty() {
         diagnostics::log_frame(output, jobs);
+        term.write_str(SAVE_CURSOR_POSITION)?;
         term.hide_cursor()?;
         term.write_line(output)?;
 
-        // Keep the cursor at the frame origin. Terminal resizes may reflow the
-        // frame below it, but cleanup can always clear from this anchor instead
-        // of reconstructing the previous physical row count.
+        // Keep the frame origin in the terminal's independent saved-cursor
+        // state. The visible cursor can reflow with the output during a resize;
+        // the next redraw restores this position before clearing.
         *lines = output_height.max(1);
-        term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term_width)?;
     } else {
         *lines = 0;
         term.show_cursor()?;
