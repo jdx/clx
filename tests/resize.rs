@@ -20,7 +20,7 @@ fn resize_child_scenario() {
 
     use clx::progress::{ProgressJobBuilder, ProgressStatus, set_interval};
 
-    set_interval(Duration::from_millis(800));
+    set_interval(Duration::from_millis(25));
     let job = ProgressJobBuilder::new().body(&"x".repeat(60)).start();
     thread::sleep(Duration::from_secs(4));
     job.set_status(ProgressStatus::Done);
@@ -103,9 +103,15 @@ fn tmux_resize_keeps_one_copy_of_each_progress_row() {
     assert!(status.success(), "tmux new-session failed");
 
     assert_unique_tmux_rows(&tmux, &socket, session, Duration::from_secs(10));
-    resize_tmux(&tmux, &socket, session, 40);
+    for columns in (40..=110).rev().step_by(10) {
+        resize_tmux(&tmux, &socket, session, columns);
+        thread::sleep(Duration::from_millis(20));
+    }
     assert_unique_tmux_rows(&tmux, &socket, session, Duration::from_secs(10));
-    resize_tmux(&tmux, &socket, session, 120);
+    for columns in (50..=120).step_by(10) {
+        resize_tmux(&tmux, &socket, session, columns);
+        thread::sleep(Duration::from_millis(20));
+    }
     assert_unique_tmux_rows(&tmux, &socket, session, Duration::from_secs(10));
 
     drop(cleanup);
@@ -159,14 +165,19 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
 
         let mut resized = Vec::new();
         assert!(
-            wait_for_frames(&rx, &mut resized, 1, Duration::from_secs(3)),
+            wait_for_frames(&rx, &mut resized, 2, Duration::from_secs(3)),
             "did not redraw at {cols} columns: {}",
             String::from_utf8_lossy(&resized).escape_debug()
         );
-        let frame = first_frame(&resized).unwrap_or(&resized);
+        let frame = synchronized_frame(&resized, 1).unwrap_or(&resized);
         assert!(
             frame.windows(4).any(|window| window == b"\x1b[2J"),
-            "resize redraw did not reset the visible viewport: {}",
+            "settled resize redraw did not reset the visible viewport: {}",
+            String::from_utf8_lossy(frame).escape_debug()
+        );
+        assert!(
+            String::from_utf8_lossy(frame).contains('x'),
+            "settled resize redraw did not contain the new frame: {}",
             String::from_utf8_lossy(frame).escape_debug()
         );
     }
@@ -206,9 +217,16 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
 
     let mut cramped = Vec::new();
     assert!(
-        !wait_for_frames(&rx, &mut cramped, 1, Duration::from_secs(1)),
-        "redrew a frame that could not be fully cleared: {}",
+        wait_for_frames(&rx, &mut cramped, 1, Duration::from_secs(3)),
+        "did not clear again while the cramped terminal kept resizing: {}",
         String::from_utf8_lossy(&cramped).escape_debug()
+    );
+    let cramped_reset = first_frame(&cramped).unwrap_or(&cramped);
+    assert!(
+        cramped_reset.windows(4).any(|window| window == b"\x1b[2J")
+            && !String::from_utf8_lossy(cramped_reset).contains('x'),
+        "cramped resize did not remain blank: {}",
+        String::from_utf8_lossy(cramped_reset).escape_debug()
     );
 
     pair.master
@@ -222,7 +240,7 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
 
     let mut resized = Vec::new();
     assert!(
-        wait_for_frames(&rx, &mut resized, 1, Duration::from_secs(10)),
+        wait_for_frames(&rx, &mut resized, 2, Duration::from_secs(10)),
         "progress display did not redraw after resize"
     );
 
@@ -230,7 +248,7 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
     drop(pair.master);
     reader_thread.join().expect("join reader");
 
-    let frame = first_frame(&resized).unwrap_or(&resized);
+    let frame = synchronized_frame(&resized, 1).unwrap_or(&resized);
     assert!(
         String::from_utf8_lossy(frame).contains('x'),
         "recovered frame did not render its output: {}",
@@ -359,12 +377,13 @@ fn assert_unique_tmux_rows(tmux: &std::ffi::OsStr, socket: &str, session: &str, 
                 .expect("capture stable tmux pane");
             let stable_screen = String::from_utf8_lossy(&stable.stdout);
             let stable_counts = LABELS.map(|label| stable_screen.matches(label).count());
-            assert_eq!(
-                stable_counts,
-                [1, 1, 1],
+            if stable_counts == [1, 1, 1] {
+                return;
+            }
+            assert!(
+                stable_counts.iter().all(|count| *count <= 1),
                 "progress rows accumulated in tmux:\n{stable_screen}"
             );
-            return;
         }
         assert!(
             counts.iter().all(|count| *count <= 1),
@@ -398,10 +417,21 @@ fn wait_for_frames(
 }
 
 fn first_frame(output: &[u8]) -> Option<&[u8]> {
-    let start = output
-        .windows(BEGIN.len())
-        .position(|window| window == BEGIN)?;
-    let rest = &output[start + BEGIN.len()..];
+    synchronized_frame(output, 0)
+}
+
+fn synchronized_frame(output: &[u8], index: usize) -> Option<&[u8]> {
+    let mut rest = output;
+    for frame_index in 0..=index {
+        let start = rest
+            .windows(BEGIN.len())
+            .position(|window| window == BEGIN)?;
+        rest = &rest[start + BEGIN.len()..];
+        if frame_index < index {
+            let end = rest.windows(END.len()).position(|window| window == END)?;
+            rest = &rest[end + END.len()..];
+        }
+    }
     let end = rest.windows(END.len()).position(|window| window == END)?;
     Some(&rest[..end])
 }

@@ -16,14 +16,59 @@ use super::state::{
     SyncUpdate, TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
 };
 
-static LAST_TERMINAL_SIZE: LazyLock<Mutex<Option<(u16, u16)>>> = LazyLock::new(|| Mutex::new(None));
+const RESIZE_SETTLE_TIME: Duration = Duration::from_millis(100);
 
-fn terminal_resized(size: (u16, u16)) -> bool {
-    let mut previous = LAST_TERMINAL_SIZE.lock().unwrap();
-    let resized = previous.is_some_and(|previous| previous != size);
-    *previous = Some(size);
-    resized
+#[derive(Default)]
+struct TerminalResizeState {
+    size: Option<(u16, u16)>,
+    changed_at: Option<Instant>,
 }
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResizeAction {
+    None,
+    ClearAndDefer,
+    Defer,
+    ClearAndRender,
+}
+
+impl TerminalResizeState {
+    fn update(
+        &mut self,
+        size: (u16, u16),
+        has_frame: bool,
+        any_running: bool,
+        now: Instant,
+    ) -> ResizeAction {
+        if !has_frame && self.changed_at.is_none() {
+            self.size = Some(size);
+            return ResizeAction::None;
+        }
+
+        if self.size != Some(size) {
+            self.size = Some(size);
+            if any_running {
+                self.changed_at = Some(now);
+                return ResizeAction::ClearAndDefer;
+            }
+            self.changed_at = None;
+            return ResizeAction::ClearAndRender;
+        }
+
+        if let Some(changed_at) = self.changed_at {
+            if any_running && now.duration_since(changed_at) < RESIZE_SETTLE_TIME {
+                return ResizeAction::Defer;
+            }
+            self.changed_at = None;
+            return ResizeAction::ClearAndRender;
+        }
+
+        ResizeAction::None
+    }
+}
+
+static TERMINAL_RESIZE_STATE: LazyLock<Mutex<TerminalResizeState>> =
+    LazyLock::new(|| Mutex::new(TerminalResizeState::default()));
 
 /// Context for rendering a frame.
 #[derive(Clone)]
@@ -120,11 +165,28 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     let _guard = TERM_LOCK.lock().unwrap();
 
     let term_size = term.size();
-    let resized = terminal_resized(term_size);
+    let any_running = jobs.iter().any(|job| job.is_running());
+    let resize_action = TERMINAL_RESIZE_STATE.lock().unwrap().update(
+        term_size,
+        *lines > 0,
+        any_running,
+        Instant::now(),
+    );
+    match resize_action {
+        ResizeAction::ClearAndDefer => {
+            let _sync = SyncUpdate::begin();
+            term.clear_screen()?;
+            term.hide_cursor()?;
+            *lines = 0;
+            return Ok(false);
+        }
+        ResizeAction::Defer => return Ok(false),
+        ResizeAction::None | ResizeAction::ClearAndRender => {}
+    }
+
     let (term_height, term_width) = term_size;
     let term_height = term_height as usize;
     let term_width = term_width as usize;
-    let any_running = jobs.iter().any(|job| job.is_running());
     let output_height = rendered_height(output, term_width);
     let previous_height = rendered_height(&previous_output, term_width);
     // Once either the old or replacement frame fills the viewport, resizing
@@ -134,7 +196,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     // render.
     if any_running && output_height.max(previous_height) >= term_height {
         let first_cramped = !CRAMPED_VIEWPORT.swap(true, std::sync::atomic::Ordering::Relaxed);
-        if *lines > 0 && (resized || first_cramped) {
+        if *lines > 0 && first_cramped {
             let _sync = SyncUpdate::begin();
             term.clear_screen()?;
             term.hide_cursor()?;
@@ -147,7 +209,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
 
     CRAMPED_VIEWPORT.store(false, std::sync::atomic::Ordering::Relaxed);
     let _sync = SyncUpdate::begin();
-    if resized && *lines > 0 {
+    if resize_action == ResizeAction::ClearAndRender {
         // A terminal can reflow the old frame before clx observes its new
         // dimensions, moving some of that frame into inaccessible scrollback.
         // Reset the visible viewport so the replacement always starts from a
@@ -439,5 +501,33 @@ mod tests {
 
         cache_written_output(&mut last_output, "written frame", true);
         assert_eq!(last_output, "written frame");
+    }
+
+    #[test]
+    fn active_resize_clears_then_waits_for_the_size_to_settle() {
+        let mut state = TerminalResizeState::default();
+        let start = Instant::now();
+
+        assert_eq!(
+            state.update((24, 80), false, true, start),
+            ResizeAction::None
+        );
+        assert_eq!(
+            state.update((24, 60), true, true, start),
+            ResizeAction::ClearAndDefer
+        );
+        assert_eq!(
+            state.update(
+                (24, 60),
+                false,
+                true,
+                start + RESIZE_SETTLE_TIME - Duration::from_millis(1)
+            ),
+            ResizeAction::Defer
+        );
+        assert_eq!(
+            state.update((24, 60), false, true, start + RESIZE_SETTLE_TIME),
+            ResizeAction::ClearAndRender
+        );
     }
 }
