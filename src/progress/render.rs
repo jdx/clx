@@ -12,8 +12,8 @@ use super::flex::flex;
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
 use super::state::{
-    JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, SyncUpdate, TERA,
-    TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
+    CRAMPED_VIEWPORT, JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING,
+    SyncUpdate, TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
 };
 
 /// Context for rendering a frame.
@@ -105,6 +105,7 @@ pub(crate) fn process_flex_output(output: &str) -> String {
 /// deferred it.
 pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<bool> {
     let term = term();
+    let previous_output = LAST_OUTPUT.lock().unwrap().clone();
     let mut lines = LINES.lock().unwrap();
 
     let _guard = TERM_LOCK.lock().unwrap();
@@ -115,13 +116,25 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     let term_width = term_width as usize;
     let any_running = jobs.iter().any(|job| job.is_running());
     let output_height = rendered_height(output, term_width);
-    // Writing a frame that fills the viewport would scroll its anchored first
-    // row out of reach. Keep the current frame until the viewport can contain
-    // the replacement. Terminal states still get one best-effort final render.
-    if any_running && output_height >= term_height {
+    let previous_height = rendered_height(&previous_output, term_width);
+    // Once either the old or replacement frame fills the viewport, resizing
+    // can push the anchored origin into scrollback before clx receives
+    // SIGWINCH. Reset the visible viewport once, then suppress output until a
+    // complete frame fits again. Terminal states still get a best-effort final
+    // render.
+    if any_running && output_height.max(previous_height) >= term_height {
+        if *lines > 0 && !CRAMPED_VIEWPORT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let _sync = SyncUpdate::begin();
+            term.clear_screen()?;
+            term.hide_cursor()?;
+            *lines = 0;
+        } else {
+            CRAMPED_VIEWPORT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         return Ok(false);
     }
 
+    CRAMPED_VIEWPORT.store(false, std::sync::atomic::Ordering::Relaxed);
     let _sync = SyncUpdate::begin();
     if *lines > 0 {
         term.clear_to_end_of_screen()?;

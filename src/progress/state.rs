@@ -126,6 +126,9 @@ pub(crate) static REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::ne
 /// Signal to stop the background refresh thread.
 pub(crate) static STOPPING: AtomicBool = AtomicBool::new(false);
 
+/// Whether output is suppressed because a complete frame cannot fit.
+pub(crate) static CRAMPED_VIEWPORT: AtomicBool = AtomicBool::new(false);
+
 /// Channel to notify the background thread of updates.
 static NOTIFY: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
 
@@ -324,6 +327,7 @@ fn start() {
                 Err(err) => {
                     eprintln!("clx: {err:?}");
                     *LINES.lock().unwrap() = 0;
+                    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
                     let _ = term().show_cursor();
                 }
             }
@@ -343,6 +347,7 @@ pub fn stop() {
     let _ = finish_frame();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
+    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
     // Ensure all output is flushed before returning
     let _ = std::io::stderr().flush();
 }
@@ -353,6 +358,7 @@ pub fn stop_clear() {
     let _ = clear();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
+    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
     // Ensure all output is flushed before returning
     let _ = std::io::stderr().flush();
 }
@@ -414,13 +420,14 @@ pub fn clear_jobs() {
 pub(crate) fn clear() -> crate::Result<()> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
+    let _guard = TERM_LOCK.lock().unwrap();
+    let _sync = SyncUpdate::begin();
     if *lines > 0 {
-        let _guard = TERM_LOCK.lock().unwrap();
-        let _sync = SyncUpdate::begin();
         term.clear_to_end_of_screen()?;
-        term.show_cursor()?;
     }
+    term.show_cursor()?;
     *lines = 0;
+    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
     Ok(())
 }
 
@@ -436,6 +443,7 @@ pub(crate) fn finish_frame() -> crate::Result<()> {
         term.show_cursor()?;
     }
     *lines = 0;
+    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
     Ok(())
 }
 

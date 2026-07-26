@@ -29,7 +29,7 @@ fn resize_child_scenario() {
 }
 
 #[test]
-fn resize_clears_the_reflowed_frame_height() {
+fn resize_resets_a_frame_that_outgrows_the_viewport() {
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -95,9 +95,15 @@ fn resize_clears_the_reflowed_frame_height() {
 
     let mut full = Vec::new();
     assert!(
-        !wait_for_frames(&rx, &mut full, 1, Duration::from_millis(500)),
-        "redrew a frame that filled the viewport: {}",
+        wait_for_frames(&rx, &mut full, 1, Duration::from_secs(3)),
+        "did not reset a viewport filled by the frame: {}",
         String::from_utf8_lossy(&full).escape_debug()
+    );
+    let reset = first_frame(&full).unwrap_or(&full);
+    assert!(
+        reset.windows(4).any(|window| window == b"\x1b[2J"),
+        "cramped resize did not clear the visible viewport: {}",
+        String::from_utf8_lossy(reset).escape_debug()
     );
 
     pair.master
@@ -136,11 +142,6 @@ fn resize_clears_the_reflowed_frame_height() {
     reader_thread.join().expect("join reader");
 
     let frame = first_frame(&resized).unwrap_or(&resized);
-    assert!(
-        frame.windows(4).any(|window| window == b"\x1b[0J"),
-        "redraw did not clear downward from the frame anchor: {}",
-        String::from_utf8_lossy(frame).escape_debug()
-    );
     assert_eq!(
         cursor_up_amount(frame),
         Some(1),
