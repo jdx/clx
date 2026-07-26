@@ -1,6 +1,6 @@
 //! Frame rendering and refresh logic for progress display.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tera::{Context, Tera};
@@ -12,10 +12,18 @@ use super::flex::flex;
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
 use super::state::{
-    CRAMPED_VIEWPORT, JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, RESTORE_CURSOR_POSITION,
-    SAVE_CURSOR_POSITION, STARTED, STOPPING, SyncUpdate, TERA, TERM_LOCK, is_disabled, is_paused,
-    term, update_osc_progress,
+    CRAMPED_VIEWPORT, JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING,
+    SyncUpdate, TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
 };
+
+static LAST_TERMINAL_SIZE: LazyLock<Mutex<Option<(u16, u16)>>> = LazyLock::new(|| Mutex::new(None));
+
+fn terminal_resized(size: (u16, u16)) -> bool {
+    let mut previous = LAST_TERMINAL_SIZE.lock().unwrap();
+    let resized = previous.is_some_and(|previous| previous != size);
+    *previous = Some(size);
+    resized
+}
 
 /// Context for rendering a frame.
 #[derive(Clone)]
@@ -112,6 +120,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     let _guard = TERM_LOCK.lock().unwrap();
 
     let term_size = term.size();
+    let resized = terminal_resized(term_size);
     let (term_height, term_width) = term_size;
     let term_height = term_height as usize;
     let term_width = term_width as usize;
@@ -124,7 +133,8 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     // complete frame fits again. Terminal states still get a best-effort final
     // render.
     if any_running && output_height.max(previous_height) >= term_height {
-        if *lines > 0 && !CRAMPED_VIEWPORT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let first_cramped = !CRAMPED_VIEWPORT.swap(true, std::sync::atomic::Ordering::Relaxed);
+        if *lines > 0 && (resized || first_cramped) {
             let _sync = SyncUpdate::begin();
             term.clear_screen()?;
             term.hide_cursor()?;
@@ -137,20 +147,24 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
 
     CRAMPED_VIEWPORT.store(false, std::sync::atomic::Ordering::Relaxed);
     let _sync = SyncUpdate::begin();
-    if *lines > 0 {
-        term.write_str(RESTORE_CURSOR_POSITION)?;
+    if resized && *lines > 0 {
+        // A terminal can reflow the old frame before clx observes its new
+        // dimensions, moving some of that frame into inaccessible scrollback.
+        // Reset the visible viewport so the replacement always starts from a
+        // known position.
+        term.clear_screen()?;
+        *lines = 0;
+    } else if *lines > 0 {
+        term.move_cursor_up(*lines)?;
+        term.move_cursor_left(term_width)?;
         term.clear_to_end_of_screen()?;
     }
 
     if !output.is_empty() {
         diagnostics::log_frame(output, jobs);
-        term.write_str(SAVE_CURSOR_POSITION)?;
         term.hide_cursor()?;
         term.write_line(output)?;
 
-        // Keep the frame origin in the terminal's independent saved-cursor
-        // state. The visible cursor can reflow with the output during a resize;
-        // the next redraw restores this position before clearing.
         *lines = output_height.max(1);
     } else {
         *lines = 0;
@@ -239,7 +253,21 @@ pub fn refresh_once() -> Result<()> {
         return Ok(());
     }
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
+    refresh_once_locked()
+}
 
+pub(crate) fn refresh_once_if_started() -> Result<()> {
+    if is_disabled() || matches!(output(), ProgressOutput::Quiet | ProgressOutput::Text) {
+        return Ok(());
+    }
+    let _refresh_guard = REFRESH_LOCK.lock().unwrap();
+    if !*STARTED.lock().unwrap() {
+        return Ok(());
+    }
+    refresh_once_locked()
+}
+
+fn refresh_once_locked() -> Result<()> {
     let frame = render_frame()?;
     let final_output = process_flex_output(&frame.output);
     let written = write_frame(&final_output, &frame.jobs)?;

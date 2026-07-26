@@ -2,6 +2,7 @@
 #![cfg(unix)]
 
 use std::io::Read;
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,8 +11,6 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 const BEGIN: &[u8] = b"\x1b[?2026h";
 const END: &[u8] = b"\x1b[?2026l";
-const SAVE_CURSOR: &[u8] = b"\x1b[s";
-const RESTORE_CURSOR: &[u8] = b"\x1b[u";
 
 #[test]
 fn resize_child_scenario() {
@@ -28,6 +27,88 @@ fn resize_child_scenario() {
     clx::progress::stop();
 
     std::process::exit(0);
+}
+
+#[test]
+fn cramped_stop_child_scenario() {
+    if std::env::var_os("CLX_CRAMPED_STOP_SCENARIO").is_none() {
+        return;
+    }
+
+    use clx::progress::{ProgressJobBuilder, set_interval};
+
+    set_interval(Duration::from_millis(25));
+    let _job = ProgressJobBuilder::new().body(&"x".repeat(60)).start();
+    thread::sleep(Duration::from_millis(1500));
+    clx::progress::stop();
+
+    std::process::exit(0);
+}
+
+#[test]
+fn tmux_resize_child_scenario() {
+    if std::env::var_os("CLX_TMUX_RESIZE_SCENARIO").is_none() {
+        return;
+    }
+
+    use clx::progress::{ProgressJobBuilder, set_interval};
+
+    set_interval(Duration::from_millis(25));
+    let _jobs = ["TMUX_ROW_ALPHA", "TMUX_ROW_BRAVO", "TMUX_ROW_CHARLIE"].map(|label| {
+        ProgressJobBuilder::new()
+            .body(&format!("{{{{ spinner() }}}} {label}"))
+            .start()
+    });
+    thread::sleep(Duration::from_secs(30));
+
+    std::process::exit(0);
+}
+
+#[test]
+fn tmux_resize_keeps_one_copy_of_each_progress_row() {
+    let Some(tmux) = std::env::var_os("CLX_TMUX_BIN") else {
+        return;
+    };
+
+    let socket = format!("clx-resize-test-{}", std::process::id());
+    let session = "clx-resize";
+    let test_binary = std::env::current_exe().expect("current_exe");
+    let child_command = format!(
+        "env CLX_TMUX_RESIZE_SCENARIO=1 {} --exact tmux_resize_child_scenario --nocapture",
+        test_binary.display()
+    );
+    let cleanup = TmuxCleanup {
+        binary: tmux.clone(),
+        socket: socket.clone(),
+    };
+
+    let status = Command::new(&tmux)
+        .args([
+            "-L",
+            &socket,
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-x",
+            "120",
+            "-y",
+            "24",
+            "-s",
+            session,
+            &child_command,
+        ])
+        .status()
+        .expect("start tmux");
+    assert!(status.success(), "tmux new-session failed");
+
+    assert_unique_tmux_rows(&tmux, &socket, session, Duration::from_secs(10));
+    resize_tmux(&tmux, &socket, session, 40);
+    assert_unique_tmux_rows(&tmux, &socket, session, Duration::from_secs(10));
+    resize_tmux(&tmux, &socket, session, 120);
+    assert_unique_tmux_rows(&tmux, &socket, session, Duration::from_secs(10));
+
+    drop(cleanup);
 }
 
 #[test]
@@ -84,8 +165,8 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
         );
         let frame = first_frame(&resized).unwrap_or(&resized);
         assert!(
-            contains(frame, RESTORE_CURSOR) && contains(frame, SAVE_CURSOR),
-            "redraw did not restore and refresh the saved origin: {}",
+            frame.windows(4).any(|window| window == b"\x1b[2J"),
+            "resize redraw did not reset the visible viewport: {}",
             String::from_utf8_lossy(frame).escape_debug()
         );
     }
@@ -151,10 +232,150 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
 
     let frame = first_frame(&resized).unwrap_or(&resized);
     assert!(
-        contains(frame, SAVE_CURSOR),
-        "recovered frame did not save its new origin: {}",
+        String::from_utf8_lossy(frame).contains('x'),
+        "recovered frame did not render its output: {}",
         String::from_utf8_lossy(frame).escape_debug()
     );
+}
+
+#[test]
+fn stop_restores_cursor_after_cramped_viewport_suppression() {
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+
+    let mut cmd = CommandBuilder::new(std::env::current_exe().expect("current_exe"));
+    cmd.args(["--exact", "cramped_stop_child_scenario", "--nocapture"]);
+    cmd.env("CLX_CRAMPED_STOP_SCENARIO", "1");
+
+    let mut child = pair.slave.spawn_command(cmd).expect("spawn child");
+    drop(pair.slave);
+
+    let mut reader = pair.master.try_clone_reader().expect("clone reader");
+    let (tx, rx) = mpsc::channel();
+    let reader_thread = thread::spawn(move || {
+        let mut chunk = [0; 4096];
+        while let Ok(count) = reader.read(&mut chunk) {
+            if count == 0 || tx.send(chunk[..count].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut initial = Vec::new();
+    assert!(
+        wait_for_frames(&rx, &mut initial, 1, Duration::from_secs(5)),
+        "progress display did not render its initial frame"
+    );
+    pair.master
+        .resize(PtySize {
+            rows: 2,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("shrink pty");
+
+    let mut stopped = Vec::new();
+    assert!(
+        wait_for_frames(&rx, &mut stopped, 1, Duration::from_secs(3)),
+        "cramped viewport did not emit a reset"
+    );
+    child.wait().expect("wait child");
+    while let Ok(chunk) = rx.recv_timeout(Duration::from_millis(100)) {
+        stopped.extend(chunk);
+    }
+    drop(pair.master);
+    reader_thread.join().expect("join reader");
+
+    let reset = stopped
+        .windows(4)
+        .position(|window| window == b"\x1b[2J")
+        .expect("cramped viewport did not clear");
+    assert!(
+        stopped[reset..]
+            .windows(6)
+            .any(|window| window == b"\x1b[?25h"),
+        "stop did not restore cursor visibility after viewport suppression: {}",
+        String::from_utf8_lossy(&stopped).escape_debug()
+    );
+}
+
+struct TmuxCleanup {
+    binary: std::ffi::OsString,
+    socket: String,
+}
+
+impl Drop for TmuxCleanup {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.binary)
+            .args(["-L", &self.socket, "kill-server"])
+            .status();
+    }
+}
+
+fn resize_tmux(tmux: &std::ffi::OsStr, socket: &str, session: &str, columns: usize) {
+    let status = Command::new(tmux)
+        .args([
+            "-L",
+            socket,
+            "resize-window",
+            "-t",
+            session,
+            "-x",
+            &columns.to_string(),
+            "-y",
+            "24",
+        ])
+        .status()
+        .expect("resize tmux");
+    assert!(status.success(), "tmux resize-window failed");
+}
+
+fn assert_unique_tmux_rows(tmux: &std::ffi::OsStr, socket: &str, session: &str, timeout: Duration) {
+    const LABELS: [&str; 3] = ["TMUX_ROW_ALPHA", "TMUX_ROW_BRAVO", "TMUX_ROW_CHARLIE"];
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = Command::new(tmux)
+            .args(["-L", socket, "capture-pane", "-p", "-t", session])
+            .output()
+            .expect("capture tmux pane");
+        assert!(output.status.success(), "tmux capture-pane failed");
+        let screen = String::from_utf8_lossy(&output.stdout);
+        let counts = LABELS.map(|label| screen.matches(label).count());
+        if counts == [1, 1, 1] {
+            // Let several stable-size refreshes run too: this catches terminals
+            // that ignore an unsupported cursor save/restore sequence.
+            thread::sleep(Duration::from_millis(150));
+            let stable = Command::new(tmux)
+                .args(["-L", socket, "capture-pane", "-p", "-t", session])
+                .output()
+                .expect("capture stable tmux pane");
+            let stable_screen = String::from_utf8_lossy(&stable.stdout);
+            let stable_counts = LABELS.map(|label| stable_screen.matches(label).count());
+            assert_eq!(
+                stable_counts,
+                [1, 1, 1],
+                "progress rows accumulated in tmux:\n{stable_screen}"
+            );
+            return;
+        }
+        assert!(
+            counts.iter().all(|count| *count <= 1),
+            "progress rows were duplicated in tmux:\n{screen}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "progress rows did not appear in tmux:\n{screen}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn wait_for_frames(
@@ -183,12 +404,6 @@ fn first_frame(output: &[u8]) -> Option<&[u8]> {
     let rest = &output[start + BEGIN.len()..];
     let end = rest.windows(END.len()).position(|window| window == END)?;
     Some(&rest[..end])
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
 }
 
 fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {

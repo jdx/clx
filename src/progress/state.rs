@@ -14,7 +14,7 @@ use console::Term;
 
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
-use super::render::{refresh, refresh_once};
+use super::render::{refresh, refresh_once_if_started};
 
 // =============================================================================
 // Environment Variable Controls
@@ -64,8 +64,6 @@ pub static TERM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 /// than probing for support, matching Homebrew/brew#23264.
 const BEGIN_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026h";
 const END_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026l";
-pub(crate) const SAVE_CURSOR_POSITION: &str = "\x1b[s";
-pub(crate) const RESTORE_CURSOR_POSITION: &str = "\x1b[u";
 
 /// Nesting depth of open synchronized updates. Mode 2026 is a set/reset flag,
 /// not a counter, so a nested reset would end the outer update early: only the
@@ -345,7 +343,7 @@ fn start() {
 /// Stops the progress display and renders the final state.
 pub fn stop() {
     STOPPING.store(true, Ordering::Relaxed);
-    let _ = refresh_once();
+    let _ = refresh_once_if_started();
     let _ = finish_frame();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
@@ -425,7 +423,8 @@ pub(crate) fn clear() -> crate::Result<()> {
     let _guard = TERM_LOCK.lock().unwrap();
     let _sync = SyncUpdate::begin();
     if *lines > 0 {
-        term.write_str(RESTORE_CURSOR_POSITION)?;
+        term.move_cursor_up(*lines)?;
+        term.move_cursor_left(term.size().1 as usize)?;
         term.clear_to_end_of_screen()?;
     }
     term.show_cursor()?;
@@ -438,7 +437,7 @@ pub(crate) fn clear() -> crate::Result<()> {
 pub(crate) fn finish_frame() -> crate::Result<()> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
-    if *lines > 0 {
+    if !is_disabled() && output() == ProgressOutput::UI {
         let _guard = TERM_LOCK.lock().unwrap();
         let _sync = SyncUpdate::begin();
         term.show_cursor()?;

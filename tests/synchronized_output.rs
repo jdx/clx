@@ -39,7 +39,12 @@ fn synchronized_output_child_scenario() {
     std::thread::sleep(Duration::from_millis(120));
     child.set_status(ProgressStatus::Done);
     root.set_status(ProgressStatus::Done);
+    // Let the background refresh observe completion and leave its final frame.
+    // Calling stop after that must not append a duplicate frame below it.
+    std::thread::sleep(Duration::from_millis(250));
+    eprintln!("CLX_BEFORE_STOP");
     clx::progress::stop();
+    eprintln!("CLX_AFTER_STOP");
 
     std::process::exit(0);
 }
@@ -75,6 +80,19 @@ fn every_redraw_is_wrapped_in_a_synchronized_update() {
     assert!(
         contains(&bytes, BEGIN),
         "scenario emitted no synchronized-update sequences; the render path did not run"
+    );
+    let after_completion = bytes
+        .split(|byte| *byte == b'\n')
+        .skip_while(|line| !contains(line, b"CLX_BEFORE_STOP"))
+        .skip(1)
+        .take_while(|line| !contains(line, b"CLX_AFTER_STOP"))
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        !contains(&after_completion, b"root") && !contains(&after_completion, b"step"),
+        "stop redrew a frame after the background thread had already completed it: {}",
+        String::from_utf8_lossy(&after_completion).escape_debug()
     );
 
     let mut open = false;
