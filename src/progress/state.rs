@@ -14,7 +14,7 @@ use console::Term;
 
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
-use super::render::{refresh, refresh_once_locked};
+use super::render::{refresh, refresh_once_locked, reset_terminal_resize_state};
 
 // =============================================================================
 // Environment Variable Controls
@@ -350,6 +350,7 @@ pub fn stop() {
     {
         let _ = refresh_once_locked();
     }
+    reset_terminal_resize_state();
     drop(refresh_guard);
     let _ = finish_frame();
     clear_osc_progress();
@@ -363,6 +364,7 @@ pub fn stop() {
 pub fn stop_clear() {
     let refresh_guard = REFRESH_LOCK.lock().unwrap();
     STOPPING.store(true, Ordering::Relaxed);
+    reset_terminal_resize_state();
     drop(refresh_guard);
     let _ = clear();
     clear_osc_progress();

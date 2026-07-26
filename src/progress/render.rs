@@ -70,6 +70,10 @@ impl TerminalResizeState {
 static TERMINAL_RESIZE_STATE: LazyLock<Mutex<TerminalResizeState>> =
     LazyLock::new(|| Mutex::new(TerminalResizeState::default()));
 
+pub(crate) fn reset_terminal_resize_state() {
+    *TERMINAL_RESIZE_STATE.lock().unwrap() = TerminalResizeState::default();
+}
+
 /// Context for rendering a frame.
 #[derive(Clone)]
 pub struct RenderContext {
