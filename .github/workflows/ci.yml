@@ -44,6 +44,13 @@ jobs:
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
       - run: mise x -- cargo msrv verify
 
+  semver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+
   # Aggregator that required-status-checks can target. If any upstream job
   # failed or was skipped, this job fails so branch protection only needs one
   # stable check name.
@@ -51,6 +58,7 @@ jobs:
     needs:
       - ci
       - msrv
+      - semver
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions: {}
