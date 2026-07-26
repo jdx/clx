@@ -150,12 +150,6 @@ pub(crate) static LAST_OSC_PERCENTAGE: Mutex<Option<u8>> = Mutex::new(None);
 /// Cache for smart refresh optimization.
 pub(crate) static LAST_OUTPUT: Mutex<String> = Mutex::new(String::new());
 
-/// Last frame written to the terminal.
-///
-/// Keeping the text lets redraws recalculate its physical height after the
-/// terminal reflows it at a different width.
-pub(crate) static LAST_FRAME: Mutex<String> = Mutex::new(String::new());
-
 /// Shared render context for refresh cycles.
 pub(crate) static RENDER_CTX: OnceLock<Mutex<super::render::RenderContext>> = OnceLock::new();
 
@@ -330,7 +324,7 @@ fn start() {
                 Err(err) => {
                     eprintln!("clx: {err:?}");
                     *LINES.lock().unwrap() = 0;
-                    LAST_FRAME.lock().unwrap().clear();
+                    let _ = term().show_cursor();
                 }
             }
             if check_resize_signaled() {
@@ -346,11 +340,9 @@ fn start() {
 pub fn stop() {
     STOPPING.store(true, Ordering::Relaxed);
     let _ = refresh_once();
+    let _ = finish_frame();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
-    // Reset LINES to prevent subsequent stop_clear() from clearing user output
-    *LINES.lock().unwrap() = 0;
-    LAST_FRAME.lock().unwrap().clear();
     // Ensure all output is flushed before returning
     let _ = std::io::stderr().flush();
 }
@@ -422,19 +414,28 @@ pub fn clear_jobs() {
 pub(crate) fn clear() -> crate::Result<()> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
-    let mut last_frame = LAST_FRAME.lock().unwrap();
-    let rendered_height = super::render::rendered_height(&last_frame, term.size().1 as usize);
-    if rendered_height > 0 {
+    if *lines > 0 {
         let _guard = TERM_LOCK.lock().unwrap();
         let _sync = SyncUpdate::begin();
-        term.move_cursor_up(rendered_height)?;
-        term.move_cursor_left(term.size().1 as usize)?;
         term.clear_to_end_of_screen()?;
-        drop(_sync);
-        drop(_guard);
+        term.show_cursor()?;
     }
     *lines = 0;
-    last_frame.clear();
+    Ok(())
+}
+
+/// Leaves the final frame visible and restores the cursor below it.
+pub(crate) fn finish_frame() -> crate::Result<()> {
+    let term = term();
+    let mut lines = LINES.lock().unwrap();
+    if *lines > 0 {
+        let _guard = TERM_LOCK.lock().unwrap();
+        let _sync = SyncUpdate::begin();
+        term.move_cursor_down(*lines)?;
+        term.move_cursor_left(term.size().1 as usize)?;
+        term.show_cursor()?;
+    }
+    *lines = 0;
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-//! Verifies that redraw cleanup follows the terminal's reflowed frame height.
+//! Verifies that redraws stay anchored while the terminal changes size.
 #![cfg(unix)]
 
 use std::io::Read;
@@ -74,17 +74,16 @@ fn resize_clears_the_reflowed_frame_height() {
             })
             .expect("resize pty while dragging");
 
-        let mut moving = Vec::new();
+        let mut resized = Vec::new();
         assert!(
-            !wait_for_frames(&rx, &mut moving, 1, Duration::from_millis(50)),
-            "redrew before the terminal size settled: {}",
-            String::from_utf8_lossy(&moving).escape_debug()
+            wait_for_frames(&rx, &mut resized, 1, Duration::from_secs(3)),
+            "did not redraw at {cols} columns: {}",
+            String::from_utf8_lossy(&resized).escape_debug()
         );
     }
 
-    // The cursor rests on the row after write_line's trailing newline. A
-    // three-row frame in a three-row viewport has already pushed its first
-    // row into scrollback, so even the equal-height case cannot be cleared.
+    // A frame that fills the viewport would scroll its anchored first row into
+    // scrollback, so keep the existing frame until there is room.
     pair.master
         .resize(PtySize {
             rows: 3,
@@ -137,10 +136,15 @@ fn resize_clears_the_reflowed_frame_height() {
     reader_thread.join().expect("join reader");
 
     let frame = first_frame(&resized).unwrap_or(&resized);
+    assert!(
+        frame.windows(4).any(|window| window == b"\x1b[0J"),
+        "redraw did not clear downward from the frame anchor: {}",
+        String::from_utf8_lossy(frame).escape_debug()
+    );
     assert_eq!(
         cursor_up_amount(frame),
         Some(1),
-        "redraw did not clear the previous frame at its reflowed height: {}",
+        "redraw did not return the cursor to the frame anchor: {}",
         String::from_utf8_lossy(frame).escape_debug()
     );
 }
@@ -174,9 +178,18 @@ fn first_frame(output: &[u8]) -> Option<&[u8]> {
 }
 
 fn cursor_up_amount(frame: &[u8]) -> Option<usize> {
-    let start = frame.windows(2).position(|window| window == b"\x1b[")? + 2;
-    let end = frame[start..].iter().position(|byte| *byte == b'A')? + start;
-    std::str::from_utf8(&frame[start..end]).ok()?.parse().ok()
+    frame.windows(2).enumerate().find_map(|(index, window)| {
+        if window != b"\x1b[" {
+            return None;
+        }
+        let digits = &frame[index + 2..];
+        let end = digits.iter().position(|byte| *byte == b'A')?;
+        if digits[..end].iter().all(u8::is_ascii_digit) {
+            std::str::from_utf8(&digits[..end]).ok()?.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {

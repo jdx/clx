@@ -1,6 +1,6 @@
 //! Frame rendering and refresh logic for progress display.
 
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tera::{Context, Tera};
@@ -12,56 +12,9 @@ use super::flex::flex;
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
 use super::state::{
-    JOBS, LAST_FRAME, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, SyncUpdate,
-    TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
+    JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, SyncUpdate, TERA,
+    TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
 };
-
-const RESIZE_SETTLE_TIME: Duration = Duration::from_millis(100);
-
-fn render_width(terminal_width: usize) -> usize {
-    terminal_width.saturating_sub(1).max(1)
-}
-
-#[derive(Default)]
-struct TerminalResizeState {
-    size: Option<(u16, u16)>,
-    changed_at: Option<Instant>,
-}
-
-impl TerminalResizeState {
-    fn should_defer(
-        &mut self,
-        size: (u16, u16),
-        has_frame: bool,
-        any_running: bool,
-        now: Instant,
-    ) -> bool {
-        if !has_frame || !any_running {
-            self.size = Some(size);
-            self.changed_at = None;
-            return false;
-        }
-
-        if self.size != Some(size) {
-            self.size = Some(size);
-            self.changed_at = Some(now);
-            return true;
-        }
-
-        if self
-            .changed_at
-            .is_some_and(|changed_at| now.duration_since(changed_at) < RESIZE_SETTLE_TIME)
-        {
-            return true;
-        }
-
-        self.changed_at = None;
-        false
-    }
-}
-
-static TERMINAL_RESIZE_STATE: LazyLock<Mutex<TerminalResizeState>> =
-    LazyLock::new(|| Mutex::new(TerminalResizeState::default()));
 
 /// Context for rendering a frame.
 #[derive(Clone)]
@@ -82,7 +35,7 @@ impl Default for RenderContext {
         Self {
             start: Instant::now(),
             now: Instant::now(),
-            width: render_width(term().size().1 as usize),
+            width: term().size().1 as usize,
             tera_ctx,
             indent: 0,
             include_children: true,
@@ -103,7 +56,7 @@ pub(crate) fn prepare_render_context() -> RenderContext {
     let ctx = RENDER_CTX.get_or_init(|| std::sync::Mutex::new(RenderContext::default()));
     let mut ctx_guard = ctx.lock().unwrap();
     ctx_guard.now = Instant::now();
-    ctx_guard.width = render_width(term().size().1 as usize);
+    ctx_guard.width = term().size().1 as usize;
     ctx_guard.clone()
 }
 
@@ -140,7 +93,7 @@ pub(crate) fn render_frame() -> Result<RenderedFrame> {
 /// Processes flex tags in the rendered output.
 pub(crate) fn process_flex_output(output: &str) -> String {
     if output.contains("<clx:flex>") || output.contains("<clx:flex_fill>") {
-        flex(output, render_width(term().size().1 as usize))
+        flex(output, term().size().1 as usize)
     } else {
         output.to_string()
     }
@@ -153,53 +106,41 @@ pub(crate) fn process_flex_output(output: &str) -> String {
 pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<bool> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
-    let mut last_frame = LAST_FRAME.lock().unwrap();
 
     let _guard = TERM_LOCK.lock().unwrap();
 
-    // Recalculate the previous frame's physical height at the current width.
-    // A terminal resize reflows existing text, so the row count recorded when
-    // the frame was written can point at the wrong starting row.
     let term_size = term.size();
-    let any_running = jobs.iter().any(|job| job.is_running());
-    if TERMINAL_RESIZE_STATE.lock().unwrap().should_defer(
-        term_size,
-        !last_frame.is_empty(),
-        any_running,
-        Instant::now(),
-    ) {
-        return Ok(false);
-    }
     let (term_height, term_width) = term_size;
     let term_height = term_height as usize;
     let term_width = term_width as usize;
-    let previous_height = rendered_height(&last_frame, term_width);
-    // Cursor-up is clamped at the top of the viewport. If a resize makes the
-    // viewport shorter than the existing frame, attempting a redraw cannot
-    // reach and erase the whole frame; each refresh would instead push another
-    // partial copy into scrollback. Leave the existing frame alone until the
-    // viewport is tall enough to address it again. Terminal states still get
-    // one best-effort final render so completed status is not lost.
-    if any_running && previous_height >= term_height {
+    let any_running = jobs.iter().any(|job| job.is_running());
+    let output_height = rendered_height(output, term_width);
+    // Writing a frame that fills the viewport would scroll its anchored first
+    // row out of reach. Keep the current frame until the viewport can contain
+    // the replacement. Terminal states still get one best-effort final render.
+    if any_running && output_height >= term_height {
         return Ok(false);
     }
+
     let _sync = SyncUpdate::begin();
-    if previous_height > 0 {
-        term.move_cursor_up(previous_height)?;
-        term.move_cursor_left(term_width)?;
+    if *lines > 0 {
         term.clear_to_end_of_screen()?;
     }
 
     if !output.is_empty() {
         diagnostics::log_frame(output, jobs);
+        term.hide_cursor()?;
         term.write_line(output)?;
 
-        // Count how many terminal rows were consumed, accounting for wrapping
-        *lines = rendered_height(output, term_width).max(1);
-        *last_frame = output.to_string();
+        // Keep the cursor at the frame origin. Terminal resizes may reflow the
+        // frame below it, but cleanup can always clear from this anchor instead
+        // of reconstructing the previous physical row count.
+        *lines = output_height.max(1);
+        term.move_cursor_up(*lines)?;
+        term.move_cursor_left(term_width)?;
     } else {
         *lines = 0;
-        last_frame.clear();
+        term.show_cursor()?;
     }
 
     Ok(true)
@@ -219,7 +160,7 @@ pub(crate) fn rendered_height(output: &str, width: usize) -> usize {
         .sum()
 }
 
-fn cache_written_output(last_output: &mut String, output: &str, written: bool) {
+pub(crate) fn cache_written_output(last_output: &mut String, output: &str, written: bool) {
     if written {
         output.clone_into(last_output);
     }
@@ -254,6 +195,7 @@ pub fn refresh() -> Result<bool> {
     if !any_running && final_output == *last_output && lines > 0 {
         drop(last_output);
         if !any_running && !any_running_check() {
+            super::state::finish_frame()?;
             *STARTED.lock().unwrap() = false;
             return Ok(false);
         }
@@ -265,6 +207,7 @@ pub fn refresh() -> Result<bool> {
     cache_written_output(&mut LAST_OUTPUT.lock().unwrap(), &final_output, written);
 
     if !any_running && !any_running_check() {
+        super::state::finish_frame()?;
         *STARTED.lock().unwrap() = false;
         return Ok(false);
     }
@@ -285,7 +228,8 @@ pub fn refresh_once() -> Result<()> {
 
     let frame = render_frame()?;
     let final_output = process_flex_output(&frame.output);
-    write_frame(&final_output, &frame.jobs)?;
+    let written = write_frame(&final_output, &frame.jobs)?;
+    cache_written_output(&mut LAST_OUTPUT.lock().unwrap(), &final_output, written);
 
     Ok(())
 }
@@ -445,14 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn render_width_keeps_output_off_the_right_margin() {
-        assert_eq!(render_width(80), 79);
-        assert_eq!(render_width(2), 1);
-        assert_eq!(render_width(1), 1);
-        assert_eq!(render_width(0), 1);
-    }
-
-    #[test]
     fn deferred_frame_does_not_advance_output_cache() {
         let mut last_output = "visible frame".to_string();
 
@@ -461,21 +397,5 @@ mod tests {
 
         cache_written_output(&mut last_output, "written frame", true);
         assert_eq!(last_output, "written frame");
-    }
-
-    #[test]
-    fn active_redraw_waits_for_terminal_size_to_settle() {
-        let mut state = TerminalResizeState::default();
-        let start = Instant::now();
-
-        assert!(!state.should_defer((24, 80), false, true, start));
-        assert!(state.should_defer((24, 60), true, true, start));
-        assert!(state.should_defer(
-            (24, 60),
-            true,
-            true,
-            start + RESIZE_SETTLE_TIME - Duration::from_millis(1)
-        ));
-        assert!(!state.should_defer((24, 60), true, true, start + RESIZE_SETTLE_TIME));
     }
 }

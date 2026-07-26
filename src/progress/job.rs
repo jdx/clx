@@ -612,8 +612,13 @@ impl ProgressJob {
         // If rendering fails the log line is already on screen — best-effort redraw.
         if let Ok(frame) = super::render::render_frame() {
             let final_output = super::render::process_flex_output(&frame.output);
-            *LAST_OUTPUT.lock().unwrap() = final_output.clone();
-            let _ = super::render::write_frame(&final_output, &frame.jobs);
+            if let Ok(written) = super::render::write_frame(&final_output, &frame.jobs) {
+                super::render::cache_written_output(
+                    &mut LAST_OUTPUT.lock().unwrap(),
+                    &final_output,
+                    written,
+                );
+            }
         }
     }
 }
