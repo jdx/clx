@@ -198,7 +198,8 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     // SIGWINCH. Reset the visible viewport once, then suppress output until a
     // complete frame fits again. Terminal states still get a best-effort final
     // render.
-    if any_running && output_height.max(previous_height) >= term_height {
+    if any_running && frame_fills_viewport(output_height, previous_height, *lines > 0, term_height)
+    {
         let first_cramped = !CRAMPED_VIEWPORT.swap(true, std::sync::atomic::Ordering::Relaxed);
         if *lines > 0 && first_cramped {
             let _sync = SyncUpdate::begin();
@@ -252,6 +253,16 @@ pub(crate) fn rendered_height(output: &str, width: usize) -> usize {
             }
         })
         .sum()
+}
+
+fn frame_fills_viewport(
+    output_height: usize,
+    previous_height: usize,
+    previous_visible: bool,
+    term_height: usize,
+) -> bool {
+    let visible_previous_height = if previous_visible { previous_height } else { 0 };
+    output_height.max(visible_previous_height) >= term_height
 }
 
 pub(crate) fn cache_written_output(last_output: &mut String, output: &str, written: bool) {
@@ -494,6 +505,13 @@ mod tests {
 
         cache_written_output(&mut last_output, "written frame", true);
         assert_eq!(last_output, "written frame");
+    }
+
+    #[test]
+    fn hidden_cached_frame_does_not_keep_viewport_cramped() {
+        assert!(!frame_fills_viewport(2, 20, false, 10));
+        assert!(frame_fills_viewport(2, 20, true, 10));
+        assert!(frame_fills_viewport(10, 2, false, 10));
     }
 
     #[test]
