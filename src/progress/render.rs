@@ -106,16 +106,28 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
     let mut last_frame = LAST_FRAME.lock().unwrap();
 
     let _guard = TERM_LOCK.lock().unwrap();
-    let _sync = SyncUpdate::begin();
 
     // Recalculate the previous frame's physical height at the current width.
     // A terminal resize reflows existing text, so the row count recorded when
     // the frame was written can point at the wrong starting row.
-    let term_width = term.size().1 as usize;
+    let (term_height, term_width) = term.size();
+    let term_height = term_height as usize;
+    let term_width = term_width as usize;
     let previous_height = rendered_height(&last_frame, term_width);
+    // Cursor-up is clamped at the top of the viewport. If a resize makes the
+    // viewport shorter than the existing frame, attempting a redraw cannot
+    // reach and erase the whole frame; each refresh would instead push another
+    // partial copy into scrollback. Leave the existing frame alone until the
+    // viewport is tall enough to address it again. Terminal states still get
+    // one best-effort final render so completed status is not lost.
+    let any_running = jobs.iter().any(|job| job.is_running());
+    if any_running && previous_height >= term_height {
+        return Ok(());
+    }
+    let _sync = SyncUpdate::begin();
     if previous_height > 0 {
         term.move_cursor_up(previous_height)?;
-        term.move_cursor_left(term.size().1 as usize)?;
+        term.move_cursor_left(term_width)?;
         term.clear_to_end_of_screen()?;
     }
 

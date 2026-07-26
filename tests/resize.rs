@@ -59,10 +59,26 @@ fn resize_clears_the_reflowed_frame_height() {
 
     let mut initial = Vec::new();
     assert!(
-        wait_for_frames(&rx, &mut initial, 1),
+        wait_for_frames(&rx, &mut initial, 1, Duration::from_secs(10)),
         "progress display did not render its initial frame"
     );
     while rx.try_recv().is_ok() {}
+
+    pair.master
+        .resize(PtySize {
+            rows: 2,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("shrink pty");
+
+    let mut cramped = Vec::new();
+    assert!(
+        !wait_for_frames(&rx, &mut cramped, 1, Duration::from_secs(1)),
+        "redrew a frame that could not be fully cleared: {}",
+        String::from_utf8_lossy(&cramped).escape_debug()
+    );
 
     pair.master
         .resize(PtySize {
@@ -75,7 +91,7 @@ fn resize_clears_the_reflowed_frame_height() {
 
     let mut resized = Vec::new();
     assert!(
-        wait_for_frames(&rx, &mut resized, 1),
+        wait_for_frames(&rx, &mut resized, 1, Duration::from_secs(10)),
         "progress display did not redraw after resize"
     );
 
@@ -92,8 +108,13 @@ fn resize_clears_the_reflowed_frame_height() {
     );
 }
 
-fn wait_for_frames(rx: &Receiver<Vec<u8>>, output: &mut Vec<u8>, expected: usize) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
+fn wait_for_frames(
+    rx: &Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    expected: usize,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
     while occurrences(output, END) < expected {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return false;
