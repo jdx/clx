@@ -1,6 +1,6 @@
 //! Frame rendering and refresh logic for progress display.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tera::{Context, Tera};
@@ -15,6 +15,49 @@ use super::state::{
     JOBS, LAST_FRAME, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, SyncUpdate,
     TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
 };
+
+const RESIZE_SETTLE_TIME: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+struct TerminalResizeState {
+    size: Option<(u16, u16)>,
+    changed_at: Option<Instant>,
+}
+
+impl TerminalResizeState {
+    fn should_defer(
+        &mut self,
+        size: (u16, u16),
+        has_frame: bool,
+        any_running: bool,
+        now: Instant,
+    ) -> bool {
+        if !has_frame || !any_running {
+            self.size = Some(size);
+            self.changed_at = None;
+            return false;
+        }
+
+        if self.size != Some(size) {
+            self.size = Some(size);
+            self.changed_at = Some(now);
+            return true;
+        }
+
+        if self
+            .changed_at
+            .is_some_and(|changed_at| now.duration_since(changed_at) < RESIZE_SETTLE_TIME)
+        {
+            return true;
+        }
+
+        self.changed_at = None;
+        false
+    }
+}
+
+static TERMINAL_RESIZE_STATE: LazyLock<Mutex<TerminalResizeState>> =
+    LazyLock::new(|| Mutex::new(TerminalResizeState::default()));
 
 /// Context for rendering a frame.
 #[derive(Clone)]
@@ -110,7 +153,17 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
     // Recalculate the previous frame's physical height at the current width.
     // A terminal resize reflows existing text, so the row count recorded when
     // the frame was written can point at the wrong starting row.
-    let (term_height, term_width) = term.size();
+    let term_size = term.size();
+    let any_running = jobs.iter().any(|job| job.is_running());
+    if TERMINAL_RESIZE_STATE.lock().unwrap().should_defer(
+        term_size,
+        !last_frame.is_empty(),
+        any_running,
+        Instant::now(),
+    ) {
+        return Ok(());
+    }
+    let (term_height, term_width) = term_size;
     let term_height = term_height as usize;
     let term_width = term_width as usize;
     let previous_height = rendered_height(&last_frame, term_width);
@@ -120,7 +173,6 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()>
     // partial copy into scrollback. Leave the existing frame alone until the
     // viewport is tall enough to address it again. Terminal states still get
     // one best-effort final render so completed status is not lost.
-    let any_running = jobs.iter().any(|job| job.is_running());
     if any_running && previous_height >= term_height {
         return Ok(());
     }
@@ -377,5 +429,21 @@ mod tests {
         let output = format!("\x1b[31m{}\x1b[0m", "x".repeat(20));
 
         assert_eq!(rendered_height(&output, 20), 1);
+    }
+
+    #[test]
+    fn active_redraw_waits_for_terminal_size_to_settle() {
+        let mut state = TerminalResizeState::default();
+        let start = Instant::now();
+
+        assert!(!state.should_defer((24, 80), false, true, start));
+        assert!(state.should_defer((24, 60), true, true, start));
+        assert!(state.should_defer(
+            (24, 60),
+            true,
+            true,
+            start + RESIZE_SETTLE_TIME - Duration::from_millis(1)
+        ));
+        assert!(!state.should_defer((24, 60), true, true, start + RESIZE_SETTLE_TIME));
     }
 }

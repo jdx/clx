@@ -64,6 +64,24 @@ fn resize_clears_the_reflowed_frame_height() {
     );
     while rx.try_recv().is_ok() {}
 
+    for cols in [30, 40] {
+        pair.master
+            .resize(PtySize {
+                rows: 24,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize pty while dragging");
+
+        let mut moving = Vec::new();
+        assert!(
+            !wait_for_frames(&rx, &mut moving, 1, Duration::from_millis(50)),
+            "redrew before the terminal size settled: {}",
+            String::from_utf8_lossy(&moving).escape_debug()
+        );
+    }
+
     // The cursor rests on the row after write_line's trailing newline. A
     // three-row frame in a three-row viewport has already pushed its first
     // row into scrollback, so even the equal-height case cannot be cleared.
