@@ -21,7 +21,7 @@ fn resize_child_scenario() {
 
     set_interval(Duration::from_millis(800));
     let job = ProgressJobBuilder::new().body(&"x".repeat(60)).start();
-    thread::sleep(Duration::from_secs(2));
+    thread::sleep(Duration::from_secs(4));
     job.set_status(ProgressStatus::Done);
     clx::progress::stop();
 
@@ -63,6 +63,25 @@ fn resize_clears_the_reflowed_frame_height() {
         "progress display did not render its initial frame"
     );
     while rx.try_recv().is_ok() {}
+
+    // The cursor rests on the row after write_line's trailing newline. A
+    // three-row frame in a three-row viewport has already pushed its first
+    // row into scrollback, so even the equal-height case cannot be cleared.
+    pair.master
+        .resize(PtySize {
+            rows: 3,
+            cols: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resize pty to exact frame height");
+
+    let mut full = Vec::new();
+    assert!(
+        !wait_for_frames(&rx, &mut full, 1, Duration::from_millis(500)),
+        "redrew a frame that filled the viewport: {}",
+        String::from_utf8_lossy(&full).escape_debug()
+    );
 
     pair.master
         .resize(PtySize {
