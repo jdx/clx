@@ -18,6 +18,10 @@ use super::state::{
 
 const RESIZE_SETTLE_TIME: Duration = Duration::from_millis(100);
 
+fn render_width(terminal_width: usize) -> usize {
+    terminal_width.saturating_sub(1).max(1)
+}
+
 #[derive(Default)]
 struct TerminalResizeState {
     size: Option<(u16, u16)>,
@@ -78,7 +82,7 @@ impl Default for RenderContext {
         Self {
             start: Instant::now(),
             now: Instant::now(),
-            width: term().size().1 as usize,
+            width: render_width(term().size().1 as usize),
             tera_ctx,
             indent: 0,
             include_children: true,
@@ -99,7 +103,7 @@ pub(crate) fn prepare_render_context() -> RenderContext {
     let ctx = RENDER_CTX.get_or_init(|| std::sync::Mutex::new(RenderContext::default()));
     let mut ctx_guard = ctx.lock().unwrap();
     ctx_guard.now = Instant::now();
-    ctx_guard.width = term().size().1 as usize;
+    ctx_guard.width = render_width(term().size().1 as usize);
     ctx_guard.clone()
 }
 
@@ -136,7 +140,7 @@ pub(crate) fn render_frame() -> Result<RenderedFrame> {
 /// Processes flex tags in the rendered output.
 pub(crate) fn process_flex_output(output: &str) -> String {
     if output.contains("<clx:flex>") || output.contains("<clx:flex_fill>") {
-        flex(output, term().size().1 as usize)
+        flex(output, render_width(term().size().1 as usize))
     } else {
         output.to_string()
     }
@@ -429,6 +433,14 @@ mod tests {
         let output = format!("\x1b[31m{}\x1b[0m", "x".repeat(20));
 
         assert_eq!(rendered_height(&output, 20), 1);
+    }
+
+    #[test]
+    fn render_width_keeps_output_off_the_right_margin() {
+        assert_eq!(render_width(80), 79);
+        assert_eq!(render_width(2), 1);
+        assert_eq!(render_width(1), 1);
+        assert_eq!(render_width(0), 1);
     }
 
     #[test]
