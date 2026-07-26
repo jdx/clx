@@ -318,18 +318,7 @@ pub fn refresh_once() -> Result<()> {
     refresh_once_locked()
 }
 
-pub(crate) fn refresh_once_if_started() -> Result<()> {
-    if is_disabled() || matches!(output(), ProgressOutput::Quiet | ProgressOutput::Text) {
-        return Ok(());
-    }
-    let _refresh_guard = REFRESH_LOCK.lock().unwrap();
-    if !*STARTED.lock().unwrap() {
-        return Ok(());
-    }
-    refresh_once_locked()
-}
-
-fn refresh_once_locked() -> Result<()> {
+pub(crate) fn refresh_once_locked() -> Result<()> {
     let frame = render_frame()?;
     let final_output = process_flex_output(&frame.output);
     let written = write_frame(&final_output, &frame.jobs)?;
