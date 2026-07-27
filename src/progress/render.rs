@@ -334,6 +334,14 @@ pub fn refresh_once() -> Result<()> {
 }
 
 pub(crate) fn refresh_once_locked() -> Result<()> {
+    // The background refresh can finish after a terminal status update wakes it
+    // but before that update reaches its synchronous refresh. In that case the
+    // final frame is already visible and finish_frame() has reset LINES, so a
+    // late write would append a duplicate instead of replacing the frame.
+    if !*STARTED.lock().unwrap() {
+        return Ok(());
+    }
+
     let frame = render_frame()?;
     let final_output = process_flex_output(&frame.output);
     let written = write_frame(&final_output, &frame.jobs)?;
@@ -512,6 +520,21 @@ mod tests {
         assert!(!frame_fills_viewport(2, 20, false, 10));
         assert!(frame_fills_viewport(2, 20, true, 10));
         assert!(frame_fills_viewport(10, 2, false, 10));
+    }
+
+    #[test]
+    fn synchronous_refresh_skips_after_background_stops() {
+        let previous_started = std::mem::replace(&mut *STARTED.lock().unwrap(), false);
+        let mut last_output = LAST_OUTPUT.lock().unwrap();
+        let previous_output = std::mem::replace(&mut *last_output, "visible final frame".into());
+        drop(last_output);
+
+        refresh_once_locked().unwrap();
+
+        let mut last_output = LAST_OUTPUT.lock().unwrap();
+        assert_eq!(*last_output, "visible final frame");
+        *last_output = previous_output;
+        *STARTED.lock().unwrap() = previous_started;
     }
 
     #[test]
