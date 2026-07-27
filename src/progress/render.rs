@@ -1,6 +1,6 @@
 //! Frame rendering and refresh logic for progress display.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tera::{Context, Tera};
@@ -12,9 +12,67 @@ use super::flex::flex;
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
 use super::state::{
-    JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING, SyncUpdate, TERA,
-    TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
+    CRAMPED_VIEWPORT, JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING,
+    SyncUpdate, TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
 };
+
+const RESIZE_SETTLE_TIME: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+struct TerminalResizeState {
+    size: Option<(u16, u16)>,
+    changed_at: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResizeAction {
+    None,
+    ClearAndDefer,
+    Defer,
+    ClearAndRender,
+}
+
+impl TerminalResizeState {
+    fn update(
+        &mut self,
+        size: (u16, u16),
+        has_frame: bool,
+        any_running: bool,
+        now: Instant,
+    ) -> ResizeAction {
+        if !has_frame && self.changed_at.is_none() {
+            self.size = Some(size);
+            return ResizeAction::None;
+        }
+
+        if self.size != Some(size) {
+            self.size = Some(size);
+            if any_running {
+                self.changed_at = Some(now);
+                return ResizeAction::ClearAndDefer;
+            }
+            self.changed_at = None;
+            return ResizeAction::ClearAndRender;
+        }
+
+        if let Some(changed_at) = self.changed_at {
+            if any_running && now.duration_since(changed_at) < RESIZE_SETTLE_TIME {
+                return ResizeAction::Defer;
+            }
+            self.changed_at = None;
+            return ResizeAction::ClearAndRender;
+        }
+
+        ResizeAction::None
+    }
+}
+
+static TERMINAL_RESIZE_STATE: LazyLock<Mutex<TerminalResizeState>> =
+    LazyLock::new(|| Mutex::new(TerminalResizeState::default()));
+
+pub(crate) fn reset_terminal_resize_state() {
+    *TERMINAL_RESIZE_STATE.lock().unwrap() = TerminalResizeState::default();
+}
 
 /// Context for rendering a frame.
 #[derive(Clone)]
@@ -100,42 +158,117 @@ pub(crate) fn process_flex_output(output: &str) -> String {
 }
 
 /// Writes a rendered frame to the terminal.
-pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<()> {
+///
+/// Returns `true` when the frame was written and `false` when a resize guard
+/// deferred it.
+pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<bool> {
     let term = term();
+    let previous_output = LAST_OUTPUT.lock().unwrap().clone();
     let mut lines = LINES.lock().unwrap();
 
     let _guard = TERM_LOCK.lock().unwrap();
-    let _sync = SyncUpdate::begin();
 
-    // Clear previous frame
-    if *lines > 0 {
+    let term_size = term.size();
+    let any_running = jobs.iter().any(|job| job.is_running());
+    let resize_action = TERMINAL_RESIZE_STATE.lock().unwrap().update(
+        term_size,
+        *lines > 0,
+        any_running,
+        Instant::now(),
+    );
+    match resize_action {
+        ResizeAction::ClearAndDefer => {
+            let _sync = SyncUpdate::begin();
+            term.clear_screen()?;
+            term.hide_cursor()?;
+            *lines = 0;
+            return Ok(false);
+        }
+        ResizeAction::Defer => return Ok(false),
+        ResizeAction::None | ResizeAction::ClearAndRender => {}
+    }
+
+    let (term_height, term_width) = term_size;
+    let term_height = term_height as usize;
+    let term_width = term_width as usize;
+    let output_height = rendered_height(output, term_width);
+    let previous_height = rendered_height(&previous_output, term_width);
+    // Once either the old or replacement frame fills the viewport, resizing
+    // can push the anchored origin into scrollback before clx receives
+    // SIGWINCH. Reset the visible viewport once, then suppress output until a
+    // complete frame fits again. Terminal states still get a best-effort final
+    // render.
+    if any_running && frame_fills_viewport(output_height, previous_height, *lines > 0, term_height)
+    {
+        let first_cramped = !CRAMPED_VIEWPORT.swap(true, std::sync::atomic::Ordering::Relaxed);
+        if *lines > 0 && first_cramped {
+            let _sync = SyncUpdate::begin();
+            term.clear_screen()?;
+            term.hide_cursor()?;
+            *lines = 0;
+        } else {
+            CRAMPED_VIEWPORT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        return Ok(false);
+    }
+
+    CRAMPED_VIEWPORT.store(false, std::sync::atomic::Ordering::Relaxed);
+    let _sync = SyncUpdate::begin();
+    if resize_action == ResizeAction::ClearAndRender {
+        // A terminal can reflow the old frame before clx observes its new
+        // dimensions, moving some of that frame into inaccessible scrollback.
+        // Reset the visible viewport so the replacement always starts from a
+        // known position.
+        term.clear_screen()?;
+        *lines = 0;
+    } else if *lines > 0 {
         term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term.size().1 as usize)?;
+        term.move_cursor_left(term_width)?;
         term.clear_to_end_of_screen()?;
     }
 
     if !output.is_empty() {
         diagnostics::log_frame(output, jobs);
+        term.hide_cursor()?;
         term.write_line(output)?;
 
-        // Count how many terminal rows were consumed, accounting for wrapping
-        let term_width = term.size().1 as usize;
-        let mut consumed_rows = 0usize;
-        for line in output.lines() {
-            let visible_width = console::measure_text_width(line).max(1);
-            let rows = if term_width == 0 {
-                1
-            } else {
-                (visible_width - 1).checked_div(term_width).unwrap_or(0) + 1
-            };
-            consumed_rows += rows.max(1);
-        }
-        *lines = consumed_rows.max(1);
+        *lines = output_height.max(1);
     } else {
         *lines = 0;
+        term.show_cursor()?;
     }
 
-    Ok(())
+    Ok(true)
+}
+
+pub(crate) fn rendered_height(output: &str, width: usize) -> usize {
+    output
+        .lines()
+        .map(|line| {
+            let visible_width = console::measure_text_width(line).max(1);
+            if width == 0 {
+                1
+            } else {
+                (visible_width - 1).checked_div(width).unwrap_or(0) + 1
+            }
+        })
+        .sum()
+}
+
+fn frame_fills_viewport(
+    output_height: usize,
+    previous_height: usize,
+    previous_visible: bool,
+    term_height: usize,
+) -> bool {
+    let visible_previous_height = if previous_visible { previous_height } else { 0 };
+    output_height.max(visible_previous_height) >= term_height
+}
+
+pub(crate) fn cache_written_output(last_output: &mut String, output: &str, written: bool) {
+    if written {
+        output.clone_into(last_output);
+    }
 }
 
 /// Performs one refresh cycle of the progress display.
@@ -162,22 +295,24 @@ pub fn refresh() -> Result<bool> {
     let final_output = process_flex_output(&frame.output);
 
     // Smart refresh: skip terminal write if output unchanged and no spinners animating
-    let mut last_output = LAST_OUTPUT.lock().unwrap();
+    let last_output = LAST_OUTPUT.lock().unwrap();
     let lines = *LINES.lock().unwrap();
     if !any_running && final_output == *last_output && lines > 0 {
         drop(last_output);
         if !any_running && !any_running_check() {
+            super::state::finish_frame()?;
             *STARTED.lock().unwrap() = false;
             return Ok(false);
         }
         return Ok(true);
     }
-    *last_output = final_output.clone();
     drop(last_output);
 
-    write_frame(&final_output, &frame.jobs)?;
+    let written = write_frame(&final_output, &frame.jobs)?;
+    cache_written_output(&mut LAST_OUTPUT.lock().unwrap(), &final_output, written);
 
     if !any_running && !any_running_check() {
+        super::state::finish_frame()?;
         *STARTED.lock().unwrap() = false;
         return Ok(false);
     }
@@ -195,10 +330,22 @@ pub fn refresh_once() -> Result<()> {
         return Ok(());
     }
     let _refresh_guard = REFRESH_LOCK.lock().unwrap();
+    refresh_once_locked()
+}
+
+pub(crate) fn refresh_once_locked() -> Result<()> {
+    // The background refresh can finish after a terminal status update wakes it
+    // but before that update reaches its synchronous refresh. In that case the
+    // final frame is already visible and finish_frame() has reset LINES, so a
+    // late write would append a duplicate instead of replacing the frame.
+    if !*STARTED.lock().unwrap() {
+        return Ok(());
+    }
 
     let frame = render_frame()?;
     let final_output = process_flex_output(&frame.output);
-    write_frame(&final_output, &frame.jobs)?;
+    let written = write_frame(&final_output, &frame.jobs)?;
+    cache_written_output(&mut LAST_OUTPUT.lock().unwrap(), &final_output, written);
 
     Ok(())
 }
@@ -339,6 +486,82 @@ mod tests {
         assert_eq!(
             result,
             "  \x1b[0;31maaaaaaaa\n  \x1b[0;31maaaaaaaa\n  \x1b[0;31maaaaaaaa\n  \x1b[0;31maaaaaaaa\n  \x1b[0;31maa"
+        );
+    }
+
+    #[test]
+    fn rendered_height_tracks_terminal_reflow() {
+        let output = "x".repeat(60);
+
+        assert_eq!(rendered_height(&output, 20), 3);
+        assert_eq!(rendered_height(&output, 80), 1);
+    }
+
+    #[test]
+    fn rendered_height_ignores_ansi_width() {
+        let output = format!("\x1b[31m{}\x1b[0m", "x".repeat(20));
+
+        assert_eq!(rendered_height(&output, 20), 1);
+    }
+
+    #[test]
+    fn deferred_frame_does_not_advance_output_cache() {
+        let mut last_output = "visible frame".to_string();
+
+        cache_written_output(&mut last_output, "deferred frame", false);
+        assert_eq!(last_output, "visible frame");
+
+        cache_written_output(&mut last_output, "written frame", true);
+        assert_eq!(last_output, "written frame");
+    }
+
+    #[test]
+    fn hidden_cached_frame_does_not_keep_viewport_cramped() {
+        assert!(!frame_fills_viewport(2, 20, false, 10));
+        assert!(frame_fills_viewport(2, 20, true, 10));
+        assert!(frame_fills_viewport(10, 2, false, 10));
+    }
+
+    #[test]
+    fn synchronous_refresh_skips_after_background_stops() {
+        let previous_started = std::mem::replace(&mut *STARTED.lock().unwrap(), false);
+        let mut last_output = LAST_OUTPUT.lock().unwrap();
+        let previous_output = std::mem::replace(&mut *last_output, "visible final frame".into());
+        drop(last_output);
+
+        refresh_once_locked().unwrap();
+
+        let mut last_output = LAST_OUTPUT.lock().unwrap();
+        assert_eq!(*last_output, "visible final frame");
+        *last_output = previous_output;
+        *STARTED.lock().unwrap() = previous_started;
+    }
+
+    #[test]
+    fn active_resize_clears_then_waits_for_the_size_to_settle() {
+        let mut state = TerminalResizeState::default();
+        let start = Instant::now();
+
+        assert_eq!(
+            state.update((24, 80), false, true, start),
+            ResizeAction::None
+        );
+        assert_eq!(
+            state.update((24, 60), true, true, start),
+            ResizeAction::ClearAndDefer
+        );
+        assert_eq!(
+            state.update(
+                (24, 60),
+                false,
+                true,
+                start + RESIZE_SETTLE_TIME - Duration::from_millis(1)
+            ),
+            ResizeAction::Defer
+        );
+        assert_eq!(
+            state.update((24, 60), false, true, start + RESIZE_SETTLE_TIME),
+            ResizeAction::ClearAndRender
         );
     }
 }

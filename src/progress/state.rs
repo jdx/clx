@@ -14,7 +14,7 @@ use console::Term;
 
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
-use super::render::{refresh, refresh_once};
+use super::render::{refresh, refresh_once_locked, reset_terminal_resize_state};
 
 // =============================================================================
 // Environment Variable Controls
@@ -125,6 +125,9 @@ pub(crate) static REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::ne
 
 /// Signal to stop the background refresh thread.
 pub(crate) static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Whether output is suppressed because a complete frame cannot fit.
+pub(crate) static CRAMPED_VIEWPORT: AtomicBool = AtomicBool::new(false);
 
 /// Channel to notify the background thread of updates.
 static NOTIFY: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
@@ -324,6 +327,8 @@ fn start() {
                 Err(err) => {
                     eprintln!("clx: {err:?}");
                     *LINES.lock().unwrap() = 0;
+                    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
+                    let _ = term().show_cursor();
                 }
             }
             if check_resize_signaled() {
@@ -337,22 +342,34 @@ fn start() {
 
 /// Stops the progress display and renders the final state.
 pub fn stop() {
+    let refresh_guard = REFRESH_LOCK.lock().unwrap();
     STOPPING.store(true, Ordering::Relaxed);
-    let _ = refresh_once();
+    if *STARTED.lock().unwrap()
+        && !is_disabled()
+        && !matches!(output(), ProgressOutput::Quiet | ProgressOutput::Text)
+    {
+        let _ = refresh_once_locked();
+    }
+    reset_terminal_resize_state();
+    drop(refresh_guard);
+    let _ = finish_frame();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
-    // Reset LINES to prevent subsequent stop_clear() from clearing user output
-    *LINES.lock().unwrap() = 0;
+    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
     // Ensure all output is flushed before returning
     let _ = std::io::stderr().flush();
 }
 
 /// Stops the progress display and clears it from the screen.
 pub fn stop_clear() {
+    let refresh_guard = REFRESH_LOCK.lock().unwrap();
     STOPPING.store(true, Ordering::Relaxed);
+    reset_terminal_resize_state();
+    drop(refresh_guard);
     let _ = clear();
     clear_osc_progress();
     *STARTED.lock().unwrap() = false;
+    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
     // Ensure all output is flushed before returning
     let _ = std::io::stderr().flush();
 }
@@ -414,16 +431,30 @@ pub fn clear_jobs() {
 pub(crate) fn clear() -> crate::Result<()> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
+    let _guard = TERM_LOCK.lock().unwrap();
+    let _sync = SyncUpdate::begin();
     if *lines > 0 {
-        let _guard = TERM_LOCK.lock().unwrap();
-        let _sync = SyncUpdate::begin();
         term.move_cursor_up(*lines)?;
         term.move_cursor_left(term.size().1 as usize)?;
         term.clear_to_end_of_screen()?;
-        drop(_sync);
-        drop(_guard);
+    }
+    term.show_cursor()?;
+    *lines = 0;
+    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Leaves the final frame visible and restores the cursor below it.
+pub(crate) fn finish_frame() -> crate::Result<()> {
+    let term = term();
+    let mut lines = LINES.lock().unwrap();
+    if !is_disabled() && output() == ProgressOutput::UI {
+        let _guard = TERM_LOCK.lock().unwrap();
+        let _sync = SyncUpdate::begin();
+        term.show_cursor()?;
     }
     *lines = 0;
+    CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
     Ok(())
 }
 
