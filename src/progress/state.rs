@@ -70,8 +70,17 @@ const END_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026l";
 /// outermost guard emits. Mutated only while `TERM_LOCK` is held.
 static SYNC_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
-fn emit_synchronized_updates() -> bool {
+/// Whether progress owns the terminal, i.e. whether cursor and frame escapes
+/// may be written at all. `Text` emits plain lines and `Quiet` emits nothing,
+/// so neither ever renders a frame to move around or a cursor to restore —
+/// writing an escape in those modes corrupts output the caller expects to hold
+/// only its own text.
+pub(crate) fn renders_to_terminal() -> bool {
     !is_disabled() && output() == ProgressOutput::UI
+}
+
+fn emit_synchronized_updates() -> bool {
+    renders_to_terminal()
 }
 
 /// RAII guard that brackets an in-place redraw in a synchronized update so a
@@ -431,14 +440,16 @@ pub fn clear_jobs() {
 pub(crate) fn clear() -> crate::Result<()> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
-    let _guard = TERM_LOCK.lock().unwrap();
-    let _sync = SyncUpdate::begin();
-    if *lines > 0 {
-        term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term.size().1 as usize)?;
-        term.clear_to_end_of_screen()?;
+    if renders_to_terminal() {
+        let _guard = TERM_LOCK.lock().unwrap();
+        let _sync = SyncUpdate::begin();
+        if *lines > 0 {
+            term.move_cursor_up(*lines)?;
+            term.move_cursor_left(term.size().1 as usize)?;
+            term.clear_to_end_of_screen()?;
+        }
+        term.show_cursor()?;
     }
-    term.show_cursor()?;
     *lines = 0;
     CRAMPED_VIEWPORT.store(false, Ordering::Relaxed);
     Ok(())
@@ -448,7 +459,7 @@ pub(crate) fn clear() -> crate::Result<()> {
 pub(crate) fn finish_frame() -> crate::Result<()> {
     let term = term();
     let mut lines = LINES.lock().unwrap();
-    if !is_disabled() && output() == ProgressOutput::UI {
+    if renders_to_terminal() {
         let _guard = TERM_LOCK.lock().unwrap();
         let _sync = SyncUpdate::begin();
         term.show_cursor()?;
