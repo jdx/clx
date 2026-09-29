@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.3](https://github.com/jdx/clx/compare/v3.0.2...v3.0.3) - 2026-09-29
+
+### Fixed
+
+- *(progress)* show running progress that reaches the terminal height without filling tmux scrollback ([#127](https://github.com/jdx/clx/pull/127))
+- *(progress)* stop duplicating a final frame taller than the terminal ([#126](https://github.com/jdx/clx/pull/126))
+
 ## [3.0.2](https://github.com/jdx/clx/compare/v3.0.1...v3.0.2) - 2026-07-27
 
 ### Fixed
