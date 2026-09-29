@@ -134,6 +134,20 @@ pub(crate) fn prepare_render_context() -> RenderContext {
 pub(crate) struct RenderedFrame {
     pub output: String,
     pub jobs: Vec<Arc<ProgressJob>>,
+    /// One entry per line of `output`: whether the line belongs to a job that
+    /// is still running, so a frame that must be cut can keep those in view.
+    pub running_lines: Vec<bool>,
+}
+
+/// Whether the job or any of its children is still running.
+fn has_running_work(job: &ProgressJob) -> bool {
+    job.is_running()
+        || job
+            .children
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|child| has_running_work(child))
 }
 
 /// Prepares the Tera engine and renders all jobs to a string.
@@ -148,16 +162,24 @@ pub(crate) fn render_frame() -> Result<RenderedFrame> {
 
     update_osc_progress(&jobs);
 
-    let output = jobs
-        .iter()
-        .map(|job| job.render(tera, ctx.clone()))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut blocks = Vec::new();
+    let mut running_lines = Vec::new();
+    for job in &jobs {
+        let block = job.render(tera, ctx.clone())?;
+        if block.is_empty() {
+            continue;
+        }
+        let running = has_running_work(job);
+        running_lines.extend(block.split('\n').map(|_| running));
+        blocks.push(block);
+    }
+    let output = blocks.join("\n");
 
-    Ok(RenderedFrame { output, jobs })
+    Ok(RenderedFrame {
+        output,
+        jobs,
+        running_lines,
+    })
 }
 
 /// Processes flex tags in the rendered output.
@@ -173,7 +195,8 @@ pub(crate) fn process_flex_output(output: &str) -> String {
 ///
 /// Returns `true` when the frame was written and `false` when a resize guard
 /// deferred it.
-pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<bool> {
+pub(crate) fn write_frame(output: &str, frame: &RenderedFrame) -> Result<bool> {
+    let jobs = &frame.jobs;
     let term = term();
     let mut lines = LINES.lock().unwrap();
 
@@ -207,7 +230,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     // before clx receives SIGWINCH), so show the rows that fit and summarize
     // the rest. The final frame is always written in full.
     let (output, truncated) = if any_running {
-        match fit_to_viewport(output, term_width, term_height) {
+        match fit_to_viewport(output, &frame.running_lines, term_width, term_height) {
             Some(fit) => fit,
             None => {
                 // Not even one job fits, e.g. a single job that wraps to more
@@ -259,25 +282,34 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
 }
 
 pub(crate) fn rendered_height(output: &str, width: usize) -> usize {
-    output
-        .lines()
-        .map(|line| {
-            let visible_width = console::measure_text_width(line).max(1);
-            if width == 0 {
-                1
-            } else {
-                (visible_width - 1).checked_div(width).unwrap_or(0) + 1
-            }
-        })
-        .sum()
+    output.lines().map(|line| line_height(line, width)).sum()
+}
+
+/// Rows a single line occupies, counting an empty line as one row.
+fn line_height(line: &str, width: usize) -> usize {
+    let visible_width = console::measure_text_width(line).max(1);
+    if width == 0 {
+        1
+    } else {
+        (visible_width - 1).checked_div(width).unwrap_or(0) + 1
+    }
 }
 
 /// Cuts a running frame to at most `term_height - 1` rows, ending it with a
 /// `… N more lines` row when lines were dropped.
 ///
+/// Lines of running jobs are kept first, then the rest from the top, so a long
+/// list of finished jobs cannot push the work in progress out of view.
+/// `running` holds one entry per line of `output`.
+///
 /// Returns the frame to write and whether it was cut, or `None` when not even
-/// the first line fits.
-fn fit_to_viewport(output: &str, width: usize, term_height: usize) -> Option<(Cow<'_, str>, bool)> {
+/// one line fits.
+fn fit_to_viewport<'a>(
+    output: &'a str,
+    running: &[bool],
+    width: usize,
+    term_height: usize,
+) -> Option<(Cow<'a, str>, bool)> {
     // Leave the row below the frame for the cursor.
     let budget = term_height.saturating_sub(1);
     if rendered_height(output, width) <= budget {
@@ -285,17 +317,25 @@ fn fit_to_viewport(output: &str, width: usize, term_height: usize) -> Option<(Co
     }
 
     let lines: Vec<&str> = output.lines().collect();
-    let marker_height = rendered_height(&format!("… {} more lines", lines.len()), width);
+    let is_running = |i: usize| running.get(i).copied().unwrap_or(false);
+    let marker_height = line_height(&format!("… {} more lines", lines.len()), width);
+    let available = budget.saturating_sub(marker_height);
+    let mut keep = vec![false; lines.len()];
     let mut used = 0;
-    let mut kept = 0;
-    for line in &lines {
-        let height = rendered_height(line, width);
-        if used + height + marker_height > budget {
-            break;
+    'priorities: for want_running in [true, false] {
+        for (i, line) in lines.iter().enumerate() {
+            if is_running(i) != want_running {
+                continue;
+            }
+            let height = line_height(line, width);
+            if used + height > available {
+                continue 'priorities;
+            }
+            used += height;
+            keep[i] = true;
         }
-        used += height;
-        kept += 1;
     }
+    let kept = keep.iter().filter(|kept| **kept).count();
     if kept == 0 {
         return None;
     }
@@ -303,7 +343,13 @@ fn fit_to_viewport(output: &str, width: usize, term_height: usize) -> Option<(Co
     let hidden = lines.len() - kept;
     let noun = if hidden == 1 { "line" } else { "lines" };
     let marker = style::edim(format!("… {hidden} more {noun}"));
-    let mut fit = lines[..kept].join("\n");
+    let mut fit = lines
+        .iter()
+        .zip(&keep)
+        .filter(|(_, kept)| **kept)
+        .map(|(line, _)| *line)
+        .collect::<Vec<_>>()
+        .join("\n");
     fit.push('\n');
     fit.push_str(&marker.to_string());
     Some((Cow::Owned(fit), true))
@@ -359,7 +405,7 @@ pub fn refresh() -> Result<bool> {
     }
     drop(last_output);
 
-    let written = write_frame(&final_output, &frame.jobs)?;
+    let written = write_frame(&final_output, &frame)?;
     cache_written_output(&mut LAST_OUTPUT.lock().unwrap(), &final_output, written);
 
     if !any_running && !any_running_check() {
@@ -406,7 +452,7 @@ pub(crate) fn refresh_once_locked() -> Result<()> {
     ) {
         return Ok(());
     }
-    let written = write_frame(&final_output, &frame.jobs)?;
+    let written = write_frame(&final_output, &frame)?;
     cache_written_output(&mut LAST_OUTPUT.lock().unwrap(), &final_output, written);
 
     Ok(())
@@ -600,9 +646,40 @@ mod tests {
         assert_eq!(last_output, "written frame");
     }
 
-    fn fit(output: &str, width: usize, height: usize) -> Option<(String, bool)> {
-        fit_to_viewport(output, width, height)
+    fn fit_running(
+        output: &str,
+        running: &[bool],
+        width: usize,
+        height: usize,
+    ) -> Option<(String, bool)> {
+        fit_to_viewport(output, running, width, height)
             .map(|(frame, cut)| (console::strip_ansi_codes(&frame).into_owned(), cut))
+    }
+
+    fn fit(output: &str, width: usize, height: usize) -> Option<(String, bool)> {
+        fit_running(output, &[], width, height)
+    }
+
+    #[test]
+    fn running_lines_stay_visible_when_finished_ones_are_cut() {
+        // Three finished jobs above the one still running.
+        assert_eq!(
+            fit_running("a\nb\nc\nd", &[false, false, false, true], 80, 4),
+            Some(("a\nd\n… 2 more lines".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn blank_lines_take_a_row_of_the_budget() {
+        assert_eq!(
+            fit("a\n\nb\nc", 80, 4),
+            Some(("a\n\n… 2 more lines".to_string(), true))
+        );
+        assert_eq!(
+            fit("a\n\n\nb", 80, 5),
+            Some(("a\n\n\nb".to_string(), false))
+        );
+        assert_eq!(rendered_height("a\n\nb", 80), 3);
     }
 
     #[test]
