@@ -134,20 +134,9 @@ pub(crate) fn prepare_render_context() -> RenderContext {
 pub(crate) struct RenderedFrame {
     pub output: String,
     pub jobs: Vec<Arc<ProgressJob>>,
-    /// One entry per line of `output`: whether the line belongs to a job that
-    /// is still running, so a frame that must be cut can keep those in view.
+    /// One entry per line of `output`: whether the line was rendered by a job
+    /// that is still running, so a frame that must be cut can keep those in view.
     pub running_lines: Vec<bool>,
-}
-
-/// Whether the job or any of its children is still running.
-fn has_running_work(job: &ProgressJob) -> bool {
-    job.is_running()
-        || job
-            .children
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|child| has_running_work(child))
 }
 
 /// Prepares the Tera engine and renders all jobs to a string.
@@ -165,12 +154,18 @@ pub(crate) fn render_frame() -> Result<RenderedFrame> {
     let mut blocks = Vec::new();
     let mut running_lines = Vec::new();
     for job in &jobs {
-        let block = job.render(tera, ctx.clone())?;
+        let segments = job.render_segments(tera, ctx.clone())?;
+        let block = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         if block.is_empty() {
             continue;
         }
-        let running = has_running_work(job);
-        running_lines.extend(block.split('\n').map(|_| running));
+        for segment in &segments {
+            running_lines.extend(segment.text.split('\n').map(|_| segment.running));
+        }
         blocks.push(block);
     }
     let output = blocks.join("\n");
@@ -322,14 +317,14 @@ fn fit_to_viewport<'a>(
     let available = budget.saturating_sub(marker_height);
     let mut keep = vec![false; lines.len()];
     let mut used = 0;
-    'priorities: for want_running in [true, false] {
+    for want_running in [true, false] {
         for (i, line) in lines.iter().enumerate() {
             if is_running(i) != want_running {
                 continue;
             }
             let height = line_height(line, width);
             if used + height > available {
-                continue 'priorities;
+                continue;
             }
             used += height;
             keep[i] = true;
@@ -661,11 +656,71 @@ mod tests {
     }
 
     #[test]
+    fn segments_flag_only_the_jobs_that_are_running() {
+        use super::super::{ProgressJobBuilder, ProgressJobDoneBehavior, ProgressStatus};
+
+        let parent = ProgressJobBuilder::new().body("parent").build();
+        for (body, status) in [
+            ("done-1", ProgressStatus::Done),
+            ("done-2", ProgressStatus::Done),
+            ("active", ProgressStatus::Running),
+        ] {
+            let child = ProgressJobBuilder::new()
+                .body(body)
+                .status(status)
+                .on_done(ProgressJobDoneBehavior::Keep)
+                .build();
+            parent.children.lock().unwrap().push(Arc::new(child));
+        }
+
+        let mut tera = Tera::default();
+        let segments = parent
+            .render_segments(&mut tera, RenderContext::default())
+            .unwrap();
+        let rendered: Vec<_> = segments
+            .iter()
+            .map(|segment| (segment.text.trim(), segment.running))
+            .collect();
+        assert_eq!(
+            rendered,
+            [
+                ("parent", true),
+                ("done-1", false),
+                ("done-2", false),
+                ("active", true)
+            ]
+        );
+        let joined = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            joined,
+            parent.render(&mut tera, RenderContext::default()).unwrap()
+        );
+    }
+
+    #[test]
     fn running_lines_stay_visible_when_finished_ones_are_cut() {
         // Three finished jobs above the one still running.
         assert_eq!(
             fit_running("a\nb\nc\nd", &[false, false, false, true], 80, 4),
             Some(("a\nd\n… 2 more lines".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn a_running_line_too_tall_to_fit_does_not_hide_shorter_ones() {
+        let wide = "x".repeat(30);
+        assert_eq!(
+            fit_running(
+                &format!("{wide}\nb\nc\nd"),
+                &[true, true, false, false],
+                20,
+                3
+            ),
+            Some(("b\n… 3 more lines".to_string(), true))
         );
     }
 
@@ -710,7 +765,8 @@ mod tests {
         assert_eq!(fit(&output, 20, 5).map(|(_, cut)| cut), Some(false));
         assert_eq!(
             fit(&output, 20, 4),
-            Some(("a\n… 2 more lines".to_string(), true))
+            // The wrapped line is skipped, but the short one after it still fits.
+            Some(("a\nb\n… 1 more line".to_string(), true))
         );
     }
 
