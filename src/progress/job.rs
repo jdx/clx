@@ -219,7 +219,24 @@ pub struct ProgressJob {
 
 impl ProgressJob {
     /// Renders this job to a string using the given Tera engine and context.
-    pub(crate) fn render(&self, tera: &mut Tera, mut ctx: RenderContext) -> Result<String> {
+    pub(crate) fn render(&self, tera: &mut Tera, ctx: RenderContext) -> Result<String> {
+        Ok(self
+            .render_segments(tera, ctx)?
+            .into_iter()
+            .map(|segment| segment.text)
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
+    /// Renders the job and its displayed children as one segment per job, in
+    /// display order. Joining the segments' text with newlines gives the
+    /// output of [`render`](Self::render); each segment also records whether
+    /// its own job is still running.
+    pub(crate) fn render_segments(
+        &self,
+        tera: &mut Tera,
+        mut ctx: RenderContext,
+    ) -> Result<Vec<RenderedSegment>> {
         let mut s = vec![];
         ctx.tera_ctx.extend(self.tera_ctx.lock().unwrap().clone());
         ctx.progress = if let (Some(progress_current), Some(progress_total)) = (
@@ -232,7 +249,7 @@ impl ProgressJob {
         };
         add_tera_functions(tera, &ctx, self);
         if !self.should_display() {
-            return Ok(String::new());
+            return Ok(s);
         }
         let body = if output() == ProgressOutput::Text {
             self.body_text
@@ -252,19 +269,35 @@ impl ProgressJob {
         let rendered_body = tera.render(&name, &ctx.tera_ctx)?;
         let flex_width = ctx.width.saturating_sub(ctx.indent);
         let body = flex(&rendered_body, flex_width);
-        s.push(body.trim_end().to_string());
+        s.push(RenderedSegment {
+            text: body.trim_end().to_string(),
+            running: self.is_running(),
+        });
         if ctx.include_children && self.should_display_children() {
             ctx.indent += 1;
             let children = self.children.lock().unwrap();
             for child in children.iter() {
-                let child_output = child.render(tera, ctx.clone())?;
-                if !child_output.is_empty() {
-                    let child_output = indent(child_output, ctx.width - ctx.indent + 1, ctx.indent);
-                    s.push(child_output);
+                let mut child_segments = child.render_segments(tera, ctx.clone())?;
+                if child_segments.iter().all(|segment| segment.text.is_empty())
+                    && child_segments.len() <= 1
+                {
+                    continue;
                 }
+                for segment in &mut child_segments {
+                    segment.text = if segment.text.is_empty() {
+                        " ".repeat(ctx.indent)
+                    } else {
+                        indent(
+                            std::mem::take(&mut segment.text),
+                            ctx.width - ctx.indent + 1,
+                            ctx.indent,
+                        )
+                    };
+                }
+                s.extend(child_segments);
             }
         }
-        Ok(s.join("\n"))
+        Ok(s)
     }
 
     fn should_display(&self) -> bool {
@@ -612,7 +645,7 @@ impl ProgressJob {
         // If rendering fails the log line is already on screen — best-effort redraw.
         if let Ok(frame) = super::render::render_frame() {
             let final_output = super::render::process_flex_output(&frame.output);
-            if let Ok(written) = super::render::write_frame(&final_output, &frame.jobs) {
+            if let Ok(written) = super::render::write_frame(&final_output, &frame) {
                 super::render::cache_written_output(
                     &mut LAST_OUTPUT.lock().unwrap(),
                     &final_output,
@@ -621,6 +654,12 @@ impl ProgressJob {
             }
         }
     }
+}
+
+/// One job's rendered text and whether that job is still running.
+pub(crate) struct RenderedSegment {
+    pub text: String,
+    pub running: bool,
 }
 
 impl fmt::Debug for ProgressJob {

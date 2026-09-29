@@ -108,3 +108,128 @@ fn final_frame_taller_than_the_terminal_is_written_once() {
         }
     }
 }
+
+#[test]
+fn tmux_running_frame_child_scenario() {
+    let Some(count) = std::env::var("CLX_TMUX_RUNNING_JOBS")
+        .ok()
+        .and_then(|n| n.parse::<usize>().ok())
+    else {
+        return;
+    };
+
+    use clx::progress::{ProgressJobBuilder, ProgressStatus, set_interval};
+
+    // Finish the first `done` jobs so the running ones sit below finished rows.
+    let done: usize = std::env::var("CLX_TMUX_DONE_JOBS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    set_interval(Duration::from_millis(25));
+    let jobs: Vec<_> = (1..=count)
+        .map(|i| {
+            ProgressJobBuilder::new()
+                .prop("message", &format!("job-{i}"))
+                .body("{{ spinner() }} {{ message }}")
+                .start()
+        })
+        .collect();
+    for job in jobs.iter().take(done) {
+        job.set_status(ProgressStatus::Done);
+    }
+    thread::sleep(Duration::from_secs(30));
+
+    std::process::exit(0);
+}
+
+/// Runs `count` running jobs in a fresh 80x24 tmux pane and returns the pane
+/// text, scrollback included, after the progress display has redrawn for a while.
+fn tmux_pane_after_redraws(tmux: &std::ffi::OsStr, count: usize, done: usize) -> Vec<String> {
+    use std::process::Command;
+
+    let socket = format!("clx-running-test-{}-{count}-{done}", std::process::id());
+    let test_binary = std::env::current_exe().expect("current_exe");
+    // tmux runs the command through a shell, so quote the path.
+    let child_command = format!(
+        "env CLX_TMUX_RUNNING_JOBS={count} CLX_TMUX_DONE_JOBS={done} '{}' --exact tmux_running_frame_child_scenario --nocapture",
+        test_binary.display().to_string().replace('\'', "'\\''")
+    );
+    let run = |args: &[&str]| {
+        Command::new(tmux)
+            .args(["-L", &socket, "-f", "/dev/null"])
+            .args(args)
+            .output()
+            .expect("run tmux")
+    };
+    struct Cleanup<'a>(&'a dyn Fn());
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            (self.0)();
+        }
+    }
+    let kill = || {
+        let _ = run(&["kill-server"]);
+    };
+    let _cleanup = Cleanup(&kill);
+
+    let started = run(&[
+        "new-session",
+        "-d",
+        "-x",
+        "80",
+        "-y",
+        "24",
+        "-s",
+        "clx-running",
+        &child_command,
+    ]);
+    assert!(started.status.success(), "tmux new-session failed");
+    // Let a few dozen redraws happen.
+    thread::sleep(Duration::from_secs(2));
+    let captured = run(&["capture-pane", "-p", "-t", "clx-running", "-S", "-"]);
+    assert!(captured.status.success(), "tmux capture-pane failed");
+    String::from_utf8_lossy(&captured.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn tmux_running_frame_leaves_no_copies_in_scrollback() {
+    let Some(tmux) = std::env::var_os("CLX_TMUX_BIN") else {
+        return;
+    };
+
+    // Shorter than the terminal, and as tall as it can be while still fitting:
+    // every redraw used to leave a copy in history.
+    for count in [10, 23] {
+        let lines = tmux_pane_after_redraws(&tmux, count, 0);
+        assert_eq!(copies_of(&lines, "job-1"), 1, "{count} jobs: {lines:#?}");
+    }
+
+    // Taller than the terminal: the screen used to stay blank.
+    let lines = tmux_pane_after_redraws(&tmux, 30, 0);
+    assert_eq!(copies_of(&lines, "job-1"), 1, "{lines:#?}");
+    assert!(
+        lines.iter().any(|line| line.contains("more lines")),
+        "no summary of the hidden jobs: {lines:#?}"
+    );
+}
+
+#[test]
+fn tmux_running_job_stays_visible_below_finished_jobs() {
+    let Some(tmux) = std::env::var_os("CLX_TMUX_BIN") else {
+        return;
+    };
+
+    // 25 of 30 jobs are done; the five running ones are the last five rows of
+    // the full frame and must not be cut in favor of the finished rows above.
+    let lines = tmux_pane_after_redraws(&tmux, 30, 25);
+    for label in ["job-26", "job-30"] {
+        assert_eq!(copies_of(&lines, label), 1, "{label}: {lines:#?}");
+    }
+    assert!(
+        lines.iter().any(|line| line.contains("more lines")),
+        "no summary of the hidden jobs: {lines:#?}"
+    );
+}
