@@ -297,7 +297,7 @@ pub fn refresh() -> Result<bool> {
     // Smart refresh: skip terminal write if output unchanged and no spinners animating
     let last_output = LAST_OUTPUT.lock().unwrap();
     let lines = *LINES.lock().unwrap();
-    if !any_running && final_output == *last_output && lines > 0 {
+    if final_frame_is_visible(any_running, &final_output, &last_output, lines) {
         drop(last_output);
         if !any_running && !any_running_check() {
             super::state::finish_frame()?;
@@ -344,10 +344,34 @@ pub(crate) fn refresh_once_locked() -> Result<()> {
 
     let frame = render_frame()?;
     let final_output = process_flex_output(&frame.output);
+    let any_running = frame.jobs.iter().any(|job| job.is_running());
+    if final_frame_is_visible(
+        any_running,
+        &final_output,
+        &LAST_OUTPUT.lock().unwrap(),
+        *LINES.lock().unwrap(),
+    ) {
+        return Ok(());
+    }
     let written = write_frame(&final_output, &frame.jobs)?;
     cache_written_output(&mut LAST_OUTPUT.lock().unwrap(), &final_output, written);
 
     Ok(())
+}
+
+/// Returns `true` when redrawing would only repeat a settled frame.
+///
+/// Redrawing moves the cursor up by the frame height, which cannot reach rows
+/// that already scrolled off a frame taller than the terminal. Erasing and
+/// rewriting such a frame would leave the top of the old copy in scrollback
+/// above the new one.
+fn final_frame_is_visible(
+    any_running: bool,
+    output: &str,
+    last_output: &str,
+    lines: usize,
+) -> bool {
+    !any_running && lines > 0 && output == last_output
 }
 
 /// Indents a string with wrapping support.
@@ -520,6 +544,16 @@ mod tests {
         assert!(!frame_fills_viewport(2, 20, false, 10));
         assert!(frame_fills_viewport(2, 20, true, 10));
         assert!(frame_fills_viewport(10, 2, false, 10));
+    }
+
+    #[test]
+    fn settled_frame_is_not_redrawn() {
+        assert!(final_frame_is_visible(false, "frame", "frame", 30));
+        // Spinners animate while a job runs.
+        assert!(!final_frame_is_visible(true, "frame", "frame", 30));
+        assert!(!final_frame_is_visible(false, "new", "frame", 30));
+        // Nothing is on screen (e.g. after a resize cleared it).
+        assert!(!final_frame_is_visible(false, "frame", "frame", 0));
     }
 
     #[test]
