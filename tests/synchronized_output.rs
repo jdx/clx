@@ -111,7 +111,7 @@ fn every_redraw_is_wrapped_in_a_synchronized_update() {
             }
             Escape::Erase => assert!(
                 open,
-                "in-place redraw (cursor-up or clear-to-end-of-screen) outside a synchronized update"
+                "in-place redraw (cursor-up or clear-line) outside a synchronized update"
             ),
         }
     }
@@ -125,7 +125,7 @@ enum Escape {
 }
 
 /// Yields the redraw-relevant CSI sequences in order: the mode-2026 begin/end
-/// pair and the erase operations (cursor-up `ESC[<n>A`, clear-to-end `ESC[0J`).
+/// pair and the erase operations (cursor-up `ESC[<n>A`, clear-line `ESC[2K`).
 /// Every other byte, including OSC sequences and the frame text, is ignored.
 fn escapes(bytes: &[u8]) -> Vec<Escape> {
     let mut out = Vec::new();
@@ -148,7 +148,7 @@ fn escapes(bytes: &[u8]) -> Vec<Escape> {
         match final_byte {
             b'h' if params == b"?2026" => out.push(Escape::Begin),
             b'l' if params == b"?2026" => out.push(Escape::End),
-            b'A' | b'J' => out.push(Escape::Erase),
+            b'A' | b'J' | b'K' => out.push(Escape::Erase),
             _ => {}
         }
         i = j + 1;

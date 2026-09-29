@@ -1,19 +1,21 @@
 //! Frame rendering and refresh logic for progress display.
 
+use std::borrow::Cow;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use tera::{Context, Tera};
 
-use crate::Result;
+use crate::{Result, style};
 
 use super::diagnostics;
 use super::flex::flex;
 use super::job::ProgressJob;
 use super::output::{ProgressOutput, output};
 use super::state::{
-    CRAMPED_VIEWPORT, JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED, STOPPING,
-    SyncUpdate, TERA, TERM_LOCK, is_disabled, is_paused, term, update_osc_progress,
+    CRAMPED_VIEWPORT, FRAME_TRUNCATED, JOBS, LAST_OUTPUT, LINES, REFRESH_LOCK, RENDER_CTX, STARTED,
+    STOPPING, SyncUpdate, TERA, TERM_LOCK, erase_rows_above, is_disabled, is_paused,
+    reset_viewport, term, update_osc_progress,
 };
 
 const RESIZE_SETTLE_TIME: Duration = Duration::from_millis(100);
@@ -163,7 +165,6 @@ pub(crate) fn process_flex_output(output: &str) -> String {
 /// deferred it.
 pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<bool> {
     let term = term();
-    let previous_output = LAST_OUTPUT.lock().unwrap().clone();
     let mut lines = LINES.lock().unwrap();
 
     let _guard = TERM_LOCK.lock().unwrap();
@@ -179,7 +180,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     match resize_action {
         ResizeAction::ClearAndDefer => {
             let _sync = SyncUpdate::begin();
-            term.clear_screen()?;
+            reset_viewport(term, term_size.0 as usize)?;
             term.hide_cursor()?;
             *lines = 0;
             return Ok(false);
@@ -191,26 +192,33 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
     let (term_height, term_width) = term_size;
     let term_height = term_height as usize;
     let term_width = term_width as usize;
-    let output_height = rendered_height(output, term_width);
-    let previous_height = rendered_height(&previous_output, term_width);
-    // Once either the old or replacement frame fills the viewport, resizing
-    // can push the anchored origin into scrollback before clx receives
-    // SIGWINCH. Reset the visible viewport once, then suppress output until a
-    // complete frame fits again. Terminal states still get a best-effort final
-    // render.
-    if any_running && frame_fills_viewport(output_height, previous_height, *lines > 0, term_height)
-    {
-        let first_cramped = !CRAMPED_VIEWPORT.swap(true, std::sync::atomic::Ordering::Relaxed);
-        if *lines > 0 && first_cramped {
-            let _sync = SyncUpdate::begin();
-            term.clear_screen()?;
-            term.hide_cursor()?;
-            *lines = 0;
-        } else {
-            CRAMPED_VIEWPORT.store(true, std::sync::atomic::Ordering::Relaxed);
+    // A running frame that reaches the terminal height would scroll its first
+    // row away (and a resize could push the anchored origin into scrollback
+    // before clx receives SIGWINCH), so show the rows that fit and summarize
+    // the rest. The final frame is always written in full.
+    let (output, truncated) = if any_running {
+        match fit_to_viewport(output, term_width, term_height) {
+            Some(fit) => fit,
+            None => {
+                // Not even one job fits, e.g. a single job that wraps to more
+                // rows than the terminal has. Reset the visible viewport once
+                // and suppress output until a frame fits again.
+                let first_cramped =
+                    !CRAMPED_VIEWPORT.swap(true, std::sync::atomic::Ordering::Relaxed);
+                if *lines > 0 && first_cramped {
+                    let _sync = SyncUpdate::begin();
+                    reset_viewport(term, term_height)?;
+                    term.hide_cursor()?;
+                    *lines = 0;
+                }
+                return Ok(false);
+            }
         }
-        return Ok(false);
-    }
+    } else {
+        (output.into(), false)
+    };
+    let output = output.as_ref();
+    let output_height = rendered_height(output, term_width);
 
     CRAMPED_VIEWPORT.store(false, std::sync::atomic::Ordering::Relaxed);
     let _sync = SyncUpdate::begin();
@@ -219,12 +227,10 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
         // dimensions, moving some of that frame into inaccessible scrollback.
         // Reset the visible viewport so the replacement always starts from a
         // known position.
-        term.clear_screen()?;
+        reset_viewport(term, term_height)?;
         *lines = 0;
     } else if *lines > 0 {
-        term.move_cursor_up(*lines)?;
-        term.move_cursor_left(term_width)?;
-        term.clear_to_end_of_screen()?;
+        erase_rows_above(term, *lines)?;
     }
 
     if !output.is_empty() {
@@ -237,6 +243,7 @@ pub(crate) fn write_frame(output: &str, jobs: &[Arc<ProgressJob>]) -> Result<boo
         *lines = 0;
         term.show_cursor()?;
     }
+    FRAME_TRUNCATED.store(truncated, std::sync::atomic::Ordering::Relaxed);
 
     Ok(true)
 }
@@ -255,14 +262,41 @@ pub(crate) fn rendered_height(output: &str, width: usize) -> usize {
         .sum()
 }
 
-fn frame_fills_viewport(
-    output_height: usize,
-    previous_height: usize,
-    previous_visible: bool,
-    term_height: usize,
-) -> bool {
-    let visible_previous_height = if previous_visible { previous_height } else { 0 };
-    output_height.max(visible_previous_height) >= term_height
+/// Cuts a running frame to at most `term_height - 1` rows, ending it with a
+/// `… N more lines` row when lines were dropped.
+///
+/// Returns the frame to write and whether it was cut, or `None` when not even
+/// the first line fits.
+fn fit_to_viewport(output: &str, width: usize, term_height: usize) -> Option<(Cow<'_, str>, bool)> {
+    // Leave the row below the frame for the cursor.
+    let budget = term_height.saturating_sub(1);
+    if rendered_height(output, width) <= budget {
+        return Some((Cow::Borrowed(output), false));
+    }
+
+    let lines: Vec<&str> = output.lines().collect();
+    let marker_height = rendered_height(&format!("… {} more lines", lines.len()), width);
+    let mut used = 0;
+    let mut kept = 0;
+    for line in &lines {
+        let height = rendered_height(line, width);
+        if used + height + marker_height > budget {
+            break;
+        }
+        used += height;
+        kept += 1;
+    }
+    if kept == 0 {
+        return None;
+    }
+
+    let hidden = lines.len() - kept;
+    let noun = if hidden == 1 { "line" } else { "lines" };
+    let marker = style::edim(format!("… {hidden} more {noun}"));
+    let mut fit = lines[..kept].join("\n");
+    fit.push('\n');
+    fit.push_str(&marker.to_string());
+    Some((Cow::Owned(fit), true))
 }
 
 pub(crate) fn cache_written_output(last_output: &mut String, output: &str, written: bool) {
@@ -297,7 +331,13 @@ pub fn refresh() -> Result<bool> {
     // Smart refresh: skip terminal write if output unchanged and no spinners animating
     let last_output = LAST_OUTPUT.lock().unwrap();
     let lines = *LINES.lock().unwrap();
-    if final_frame_is_visible(any_running, &final_output, &last_output, lines) {
+    if final_frame_is_visible(
+        any_running,
+        &final_output,
+        &last_output,
+        lines,
+        FRAME_TRUNCATED.load(std::sync::atomic::Ordering::Relaxed),
+    ) {
         drop(last_output);
         if !any_running && !any_running_check() {
             super::state::finish_frame()?;
@@ -350,6 +390,7 @@ pub(crate) fn refresh_once_locked() -> Result<()> {
         &final_output,
         &LAST_OUTPUT.lock().unwrap(),
         *LINES.lock().unwrap(),
+        FRAME_TRUNCATED.load(std::sync::atomic::Ordering::Relaxed),
     ) {
         return Ok(());
     }
@@ -361,6 +402,9 @@ pub(crate) fn refresh_once_locked() -> Result<()> {
 
 /// Returns `true` when redrawing would only repeat a settled frame.
 ///
+/// A running frame that was cut to fit the terminal is never settled, even when
+/// the full output is unchanged: the full frame still has to be written.
+///
 /// Redrawing moves the cursor up by the frame height, which cannot reach rows
 /// that already scrolled off a frame taller than the terminal. Erasing and
 /// rewriting such a frame would leave the top of the old copy in scrollback
@@ -370,8 +414,9 @@ fn final_frame_is_visible(
     output: &str,
     last_output: &str,
     lines: usize,
+    truncated: bool,
 ) -> bool {
-    !any_running && lines > 0 && output == last_output
+    !any_running && lines > 0 && output == last_output && !truncated
 }
 
 /// Indents a string with wrapping support.
@@ -539,21 +584,57 @@ mod tests {
         assert_eq!(last_output, "written frame");
     }
 
+    fn fit(output: &str, width: usize, height: usize) -> Option<(String, bool)> {
+        fit_to_viewport(output, width, height)
+            .map(|(frame, cut)| (console::strip_ansi_codes(&frame).into_owned(), cut))
+    }
+
     #[test]
-    fn hidden_cached_frame_does_not_keep_viewport_cramped() {
-        assert!(!frame_fills_viewport(2, 20, false, 10));
-        assert!(frame_fills_viewport(2, 20, true, 10));
-        assert!(frame_fills_viewport(10, 2, false, 10));
+    fn frame_shorter_than_the_terminal_is_unchanged() {
+        assert_eq!(fit("a\nb\nc", 80, 4), Some(("a\nb\nc".to_string(), false)));
+    }
+
+    #[test]
+    fn frame_reaching_the_terminal_height_is_cut_with_a_marker() {
+        // Four rows leave three for the frame; one of those is the marker.
+        assert_eq!(
+            fit("a\nb\nc\nd", 80, 4),
+            Some(("a\nb\n… 2 more lines".to_string(), true))
+        );
+        // A wrapped line can be the only one hidden.
+        let wide = "x".repeat(30);
+        assert_eq!(
+            fit(&format!("a\nb\n{wide}"), 20, 4),
+            Some(("a\nb\n… 1 more line".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn wrapped_lines_count_by_their_rendered_height() {
+        let wide = "x".repeat(30);
+        let output = format!("a\n{wide}\nb");
+        // Rows: 1 + 2 + 1 = 4, so at 5 rows the frame is one row below the limit.
+        assert_eq!(fit(&output, 20, 5).map(|(_, cut)| cut), Some(false));
+        assert_eq!(
+            fit(&output, 20, 4),
+            Some(("a\n… 2 more lines".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn frame_whose_first_line_does_not_fit_is_suppressed() {
+        assert_eq!(fit(&"x".repeat(60), 20, 3), None);
+        assert_eq!(fit("a\nb", 80, 2), None);
     }
 
     #[test]
     fn settled_frame_is_not_redrawn() {
-        assert!(final_frame_is_visible(false, "frame", "frame", 30));
+        assert!(final_frame_is_visible(false, "frame", "frame", 30, false));
         // Spinners animate while a job runs.
-        assert!(!final_frame_is_visible(true, "frame", "frame", 30));
-        assert!(!final_frame_is_visible(false, "new", "frame", 30));
+        assert!(!final_frame_is_visible(true, "frame", "frame", 30, false));
+        assert!(!final_frame_is_visible(false, "new", "frame", 30, false));
         // Nothing is on screen (e.g. after a resize cleared it).
-        assert!(!final_frame_is_visible(false, "frame", "frame", 0));
+        assert!(!final_frame_is_visible(false, "frame", "frame", 0, false));
     }
 
     #[test]

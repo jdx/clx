@@ -56,6 +56,7 @@ const ESCAPES: &[(&str, &[u8])] = &[
     ("end synchronized update", b"\x1b[?2026l"),
     ("cursor up", b"\x1b[1A"),
     ("clear to end of screen", b"\x1b[0J"),
+    ("clear line", b"\x1b[2K"),
 ];
 
 fn assert_no_escapes(mode: &str, stderr: &[u8]) {

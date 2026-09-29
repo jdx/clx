@@ -11,6 +11,9 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 const BEGIN: &[u8] = b"\x1b[?2026h";
 const END: &[u8] = b"\x1b[?2026l";
+// A viewport reset homes the cursor, then blanks every row. It must not use
+// `ESC[2J`, which tmux moves into scrollback.
+const RESET: &[u8] = b"\x1b[H\x1b[2K\x1b[1B";
 
 #[test]
 fn resize_child_scenario() {
@@ -171,7 +174,7 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
         );
         let frame = synchronized_frame(&resized, 1).unwrap_or(&resized);
         assert!(
-            frame.windows(4).any(|window| window == b"\x1b[2J"),
+            contains(frame, RESET),
             "settled resize redraw did not reset the visible viewport: {}",
             String::from_utf8_lossy(frame).escape_debug()
         );
@@ -201,7 +204,7 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
     );
     let reset = first_frame(&full).unwrap_or(&full);
     assert!(
-        reset.windows(4).any(|window| window == b"\x1b[2J"),
+        contains(reset, RESET),
         "cramped resize did not clear the visible viewport: {}",
         String::from_utf8_lossy(reset).escape_debug()
     );
@@ -223,8 +226,7 @@ fn resize_resets_a_frame_that_outgrows_the_viewport() {
     );
     let cramped_reset = first_frame(&cramped).unwrap_or(&cramped);
     assert!(
-        cramped_reset.windows(4).any(|window| window == b"\x1b[2J")
-            && !String::from_utf8_lossy(cramped_reset).contains('x'),
+        contains(cramped_reset, RESET) && !String::from_utf8_lossy(cramped_reset).contains('x'),
         "cramped resize did not remain blank: {}",
         String::from_utf8_lossy(cramped_reset).escape_debug()
     );
@@ -312,8 +314,8 @@ fn stop_restores_cursor_after_cramped_viewport_suppression() {
     reader_thread.join().expect("join reader");
 
     let reset = stopped
-        .windows(4)
-        .position(|window| window == b"\x1b[2J")
+        .windows(RESET.len())
+        .position(|window| window == RESET)
         .expect("cramped viewport did not clear");
     assert!(
         stopped[reset..]
@@ -434,6 +436,10 @@ fn synchronized_frame(output: &[u8], index: usize) -> Option<&[u8]> {
     }
     let end = rest.windows(END.len()).position(|window| window == END)?;
     Some(&rest[..end])
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    occurrences(haystack, needle) > 0
 }
 
 fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {

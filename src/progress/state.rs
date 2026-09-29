@@ -138,6 +138,9 @@ pub(crate) static STOPPING: AtomicBool = AtomicBool::new(false);
 /// Whether output is suppressed because a complete frame cannot fit.
 pub(crate) static CRAMPED_VIEWPORT: AtomicBool = AtomicBool::new(false);
 
+/// Whether the frame on screen is a running frame cut to fit the terminal.
+pub(crate) static FRAME_TRUNCATED: AtomicBool = AtomicBool::new(false);
+
 /// Channel to notify the background thread of updates.
 static NOTIFY: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
 
@@ -436,6 +439,34 @@ pub fn clear_jobs() {
 // Clear Display
 // =============================================================================
 
+/// Erases the `rows` rows above the cursor and leaves the cursor on the top one.
+///
+/// This avoids `ESC[J`: tmux (`scroll-on-clear`) moves the whole screen into
+/// scrollback when it is erased from the top-left corner, which leaves a copy
+/// of the frame behind on every redraw of a frame that starts on the top row.
+/// Rows erased with `ESC[2K` are never moved into history.
+pub(crate) fn erase_rows_above(term: &Term, rows: usize) -> std::io::Result<()> {
+    if rows == 0 {
+        return Ok(());
+    }
+    let mut seq = String::from("\r");
+    for _ in 0..rows {
+        seq.push_str("\x1b[1A\x1b[2K");
+    }
+    term.write_str(&seq)
+}
+
+/// Blanks the visible viewport and homes the cursor without `ESC[2J`, which
+/// tmux (`scroll-on-clear`) moves into scrollback.
+pub(crate) fn reset_viewport(term: &Term, term_height: usize) -> std::io::Result<()> {
+    let mut seq = String::from("\x1b[H");
+    for _ in 0..term_height.saturating_sub(1) {
+        seq.push_str("\x1b[2K\x1b[1B");
+    }
+    seq.push_str("\x1b[2K\x1b[H");
+    term.write_str(&seq)
+}
+
 /// Clears the progress display from the terminal.
 pub(crate) fn clear() -> crate::Result<()> {
     let term = term();
@@ -444,9 +475,7 @@ pub(crate) fn clear() -> crate::Result<()> {
         let _guard = TERM_LOCK.lock().unwrap();
         let _sync = SyncUpdate::begin();
         if *lines > 0 {
-            term.move_cursor_up(*lines)?;
-            term.move_cursor_left(term.size().1 as usize)?;
-            term.clear_to_end_of_screen()?;
+            erase_rows_above(term, *lines)?;
         }
         term.show_cursor()?;
     }
