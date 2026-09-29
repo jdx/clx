@@ -70,6 +70,16 @@ impl TerminalResizeState {
 static TERMINAL_RESIZE_STATE: LazyLock<Mutex<TerminalResizeState>> =
     LazyLock::new(|| Mutex::new(TerminalResizeState::default()));
 
+/// Whether the terminal changed size since the last frame was drawn.
+fn viewport_resized() -> bool {
+    let size = term().size();
+    TERMINAL_RESIZE_STATE
+        .lock()
+        .unwrap()
+        .size
+        .is_some_and(|last| last != size)
+}
+
 pub(crate) fn reset_terminal_resize_state() {
     *TERMINAL_RESIZE_STATE.lock().unwrap() = TerminalResizeState::default();
 }
@@ -297,7 +307,13 @@ pub fn refresh() -> Result<bool> {
     // Smart refresh: skip terminal write if output unchanged and no spinners animating
     let last_output = LAST_OUTPUT.lock().unwrap();
     let lines = *LINES.lock().unwrap();
-    if final_frame_is_visible(any_running, &final_output, &last_output, lines) {
+    if final_frame_is_visible(
+        any_running,
+        &final_output,
+        &last_output,
+        lines,
+        viewport_resized(),
+    ) {
         drop(last_output);
         if !any_running && !any_running_check() {
             super::state::finish_frame()?;
@@ -350,6 +366,7 @@ pub(crate) fn refresh_once_locked() -> Result<()> {
         &final_output,
         &LAST_OUTPUT.lock().unwrap(),
         *LINES.lock().unwrap(),
+        viewport_resized(),
     ) {
         return Ok(());
     }
@@ -361,6 +378,9 @@ pub(crate) fn refresh_once_locked() -> Result<()> {
 
 /// Returns `true` when redrawing would only repeat a settled frame.
 ///
+/// A resize since the frame was drawn always needs a redraw: the terminal may
+/// have reflowed the old frame before clx observed the new size.
+///
 /// Redrawing moves the cursor up by the frame height, which cannot reach rows
 /// that already scrolled off a frame taller than the terminal. Erasing and
 /// rewriting such a frame would leave the top of the old copy in scrollback
@@ -370,8 +390,9 @@ fn final_frame_is_visible(
     output: &str,
     last_output: &str,
     lines: usize,
+    resized: bool,
 ) -> bool {
-    !any_running && lines > 0 && output == last_output
+    !any_running && lines > 0 && output == last_output && !resized
 }
 
 /// Indents a string with wrapping support.
@@ -548,12 +569,14 @@ mod tests {
 
     #[test]
     fn settled_frame_is_not_redrawn() {
-        assert!(final_frame_is_visible(false, "frame", "frame", 30));
+        assert!(final_frame_is_visible(false, "frame", "frame", 30, false));
         // Spinners animate while a job runs.
-        assert!(!final_frame_is_visible(true, "frame", "frame", 30));
-        assert!(!final_frame_is_visible(false, "new", "frame", 30));
+        assert!(!final_frame_is_visible(true, "frame", "frame", 30, false));
+        assert!(!final_frame_is_visible(false, "new", "frame", 30, false));
         // Nothing is on screen (e.g. after a resize cleared it).
-        assert!(!final_frame_is_visible(false, "frame", "frame", 0));
+        assert!(!final_frame_is_visible(false, "frame", "frame", 0, false));
+        // The terminal changed size since the frame was drawn.
+        assert!(!final_frame_is_visible(false, "frame", "frame", 30, true));
     }
 
     #[test]

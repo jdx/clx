@@ -67,9 +67,11 @@ fn run_scenario(rows: u16) -> Vec<String> {
         }
         output
     });
-    child.wait().expect("wait child");
+    let status = child.wait().expect("wait child");
     drop(pair.master);
     let output = reader_thread.join().expect("join reader");
+
+    assert!(status.success(), "child scenario failed: {status}");
 
     let mut parser = vt100::Parser::new(rows, 80, 1000);
     parser.process(&output);
