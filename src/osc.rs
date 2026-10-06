@@ -122,34 +122,40 @@ fn terminal_supports_osc_9_4() -> bool {
     static SUPPORTS_OSC_9_4: OnceLock<bool> = OnceLock::new();
 
     *SUPPORTS_OSC_9_4.get_or_init(|| {
-        // Check TERM_PROGRAM environment variable for terminal detection
-        if let Ok(term_program) = std::env::var("TERM_PROGRAM") {
-            if term_program == "tmux" {
-                // tmux overwrites TERM_PROGRAM for panes. Its server environment
-                // retains the value from the terminal that started the session.
-                if let Some(term_program) = tmux_term_program() {
-                    if let Some(supported) = terminal_program_supports_osc_9_4(&term_program) {
-                        return supported;
-                    }
-                }
-            } else if let Some(supported) = terminal_program_supports_osc_9_4(&term_program) {
-                return supported;
-            }
-        }
+        let term_program = std::env::var("TERM_PROGRAM").ok();
+        let tmux_session_term_program = (term_program.as_deref() == Some("tmux"))
+            .then(tmux_session_term_program)
+            .flatten();
 
-        // Check for Windows Terminal
-        if std::env::var("WT_SESSION").is_ok() {
-            return true;
-        }
-
-        // Check for VTE-based terminals (GNOME Terminal, etc.)
-        if std::env::var("VTE_VERSION").is_ok() {
-            return true;
-        }
-
-        // Default to false for unknown terminals to avoid escape sequence pollution
-        false
+        terminal_environment_supports_osc_9_4(
+            term_program.as_deref(),
+            tmux_session_term_program.as_deref(),
+            std::env::var("WT_SESSION").is_ok(),
+            std::env::var("VTE_VERSION").is_ok(),
+        )
     })
+}
+
+fn terminal_environment_supports_osc_9_4(
+    term_program: Option<&str>,
+    tmux_session_term_program: Option<&str>,
+    has_wt_session: bool,
+    has_vte_version: bool,
+) -> bool {
+    // These variables are available in the pane and are more specific than a
+    // TERM_PROGRAM value tmux may have saved for a different client.
+    if has_wt_session || has_vte_version {
+        return true;
+    }
+
+    let term_program = match term_program {
+        Some("tmux") => tmux_session_term_program,
+        term_program => term_program,
+    };
+
+    term_program
+        .and_then(terminal_program_supports_osc_9_4)
+        .unwrap_or(false)
 }
 
 /// Returns whether a known terminal program supports OSC 9;4.
@@ -166,13 +172,13 @@ fn terminal_program_supports_osc_9_4(term_program: &str) -> Option<bool> {
     }
 }
 
-/// Returns the outer terminal program saved by the current tmux server.
+/// Returns the terminal program saved in the current tmux session.
 ///
-/// tmux replaces pane `TERM_PROGRAM` with `tmux`, while its server environment
-/// keeps the value from the client that started the session.
-fn tmux_term_program() -> Option<String> {
+/// tmux replaces pane `TERM_PROGRAM` with `tmux`. This intentionally does not
+/// read the server-wide environment, which may belong to a different client.
+fn tmux_session_term_program() -> Option<String> {
     let output = std::process::Command::new("tmux")
-        .args(["show-environment", "-g", "TERM_PROGRAM"])
+        .args(["show-environment", "TERM_PROGRAM"])
         .output()
         .ok()?;
 
@@ -266,6 +272,52 @@ mod tests {
         assert_eq!(terminal_program_supports_osc_9_4("Alacritty"), Some(false));
         assert_eq!(terminal_program_supports_osc_9_4("tmux"), None);
         assert_eq!(terminal_program_supports_osc_9_4("unknown"), None);
+    }
+
+    #[test]
+    fn test_terminal_environment_support() {
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("ghostty"),
+            None,
+            false,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("Alacritty"),
+            None,
+            false,
+            false
+        ));
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            Some("iTerm.app"),
+            false,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            Some("Alacritty"),
+            false,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            None,
+            false,
+            false
+        ));
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            Some("Alacritty"),
+            false,
+            true
+        ));
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            Some("Alacritty"),
+            true,
+            false
+        ));
     }
 
     #[test]
