@@ -142,20 +142,22 @@ fn terminal_environment_supports_osc_9_4(
     has_wt_session: bool,
     has_vte_version: bool,
 ) -> bool {
-    // These variables are available in the pane and are more specific than a
-    // TERM_PROGRAM value tmux may have saved for a different client.
-    if has_wt_session || has_vte_version {
-        return true;
+    match term_program {
+        Some("tmux") => {
+            // These variables are available in the pane and are more specific
+            // than a TERM_PROGRAM value tmux may have saved for another client.
+            if has_wt_session || has_vte_version {
+                return true;
+            }
+
+            tmux_session_term_program
+                .and_then(terminal_program_supports_osc_9_4)
+                .unwrap_or(false)
+        }
+        Some(term_program) => terminal_program_supports_osc_9_4(term_program)
+            .unwrap_or(has_wt_session || has_vte_version),
+        None => has_wt_session || has_vte_version,
     }
-
-    let term_program = match term_program {
-        Some("tmux") => tmux_session_term_program,
-        term_program => term_program,
-    };
-
-    term_program
-        .and_then(terminal_program_supports_osc_9_4)
-        .unwrap_or(false)
 }
 
 /// Returns whether a known terminal program supports OSC 9;4.
@@ -315,6 +317,24 @@ mod tests {
         assert!(terminal_environment_supports_osc_9_4(
             Some("tmux"),
             Some("Alacritty"),
+            true,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("WezTerm"),
+            None,
+            true,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("Alacritty"),
+            None,
+            false,
+            true
+        ));
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("unknown"),
+            None,
             true,
             false
         ));
