@@ -9,6 +9,7 @@
 //! - **Windows Terminal** - Full support
 //! - **iTerm2** - Full support
 //! - **VTE-based terminals** (GNOME Terminal, etc.) - Full support
+//! - **tmux** - Passthrough support when `allow-passthrough` is enabled
 //!
 //! The progress indicator is automatically updated based on job progress and will
 //! show different states (normal, error, warning) based on job status.
@@ -28,7 +29,10 @@
 //!
 //! When progress jobs are running, clx automatically sends OSC 9;4 sequences to
 //! update the terminal's progress indicator. The progress percentage is calculated
-//! from job progress values or estimated from job status.
+//! from job progress values or estimated from job status. Inside tmux, the sequence
+//! is sent through tmux's passthrough protocol when `TMUX` is set. This requires the
+//! user to enable tmux's `allow-passthrough` pane option; clx does not change tmux
+//! configuration.
 
 use std::io::Write;
 use std::sync::OnceLock;
@@ -174,11 +178,27 @@ fn write_progress(state: ProgressState, progress: u8) -> std::io::Result<()> {
     }
 
     let mut stderr = std::io::stderr();
-    // OSC 9;4 format: ESC ] 9 ; 4 ; <state> ; <progress> BEL
+    // OSC 9;4 format: ESC ] 9 ; 4 ; <state> ; <progress> ST
     // Note: The color is controlled by the terminal theme
     // Ghostty may show cyan automatically for normal progress
-    write!(stderr, "\x1b]9;4;{};{}\x1b\\", state.as_code(), progress)?;
+    let sequence = progress_sequence(state, progress, is_inside_tmux());
+    stderr.write_all(sequence.as_bytes())?;
     stderr.flush()
+}
+
+fn is_inside_tmux() -> bool {
+    std::env::var_os("TMUX").is_some_and(|tmux| !tmux.is_empty())
+}
+
+fn progress_sequence(state: ProgressState, progress: u8, tmux_passthrough: bool) -> String {
+    let sequence = format!("\x1b]9;4;{};{}\x1b\\", state.as_code(), progress);
+
+    if tmux_passthrough {
+        // tmux DCS passthrough requires every ESC in its payload to be doubled.
+        format!("\x1bPtmux;{}\x1b\\", sequence.replace('\x1b', "\x1b\x1b"))
+    } else {
+        sequence
+    }
 }
 
 /// Clears any terminal progress indicator.
@@ -201,6 +221,22 @@ mod tests {
         assert_eq!(ProgressState::Error.as_code(), 2);
         assert_eq!(ProgressState::Indeterminate.as_code(), 3);
         assert_eq!(ProgressState::Warning.as_code(), 4);
+    }
+
+    #[test]
+    fn test_progress_sequence_without_tmux_is_raw_osc() {
+        assert_eq!(
+            progress_sequence(ProgressState::Normal, 75, false),
+            "\x1b]9;4;1;75\x1b\\"
+        );
+    }
+
+    #[test]
+    fn test_progress_sequence_with_tmux_uses_passthrough() {
+        assert_eq!(
+            progress_sequence(ProgressState::Normal, 75, true),
+            "\x1bPtmux;\x1b\x1b]9;4;1;75\x1b\x1b\\\x1b\\"
+        );
     }
 
     #[test]
