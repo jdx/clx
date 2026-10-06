@@ -9,6 +9,7 @@
 //! - **Windows Terminal** - Full support
 //! - **iTerm2** - Full support
 //! - **VTE-based terminals** (GNOME Terminal, etc.) - Full support
+//! - **tmux** - Passthrough support when `allow-passthrough` is enabled
 //!
 //! The progress indicator is automatically updated based on job progress and will
 //! show different states (normal, error, warning) based on job status.
@@ -28,7 +29,10 @@
 //!
 //! When progress jobs are running, clx automatically sends OSC 9;4 sequences to
 //! update the terminal's progress indicator. The progress percentage is calculated
-//! from job progress values or estimated from job status.
+//! from job progress values or estimated from job status. Inside tmux, the sequence
+//! is sent through tmux's passthrough protocol when `TMUX` is set. This requires the
+//! user to enable tmux's `allow-passthrough` pane option; clx does not change tmux
+//! configuration.
 
 use std::io::Write;
 use std::sync::OnceLock;
@@ -118,33 +122,73 @@ fn terminal_supports_osc_9_4() -> bool {
     static SUPPORTS_OSC_9_4: OnceLock<bool> = OnceLock::new();
 
     *SUPPORTS_OSC_9_4.get_or_init(|| {
-        // Check TERM_PROGRAM environment variable for terminal detection
-        if let Ok(term_program) = std::env::var("TERM_PROGRAM") {
-            match term_program.as_str() {
-                // Supported terminals
-                "ghostty" => return true,
-                "vscode" => return true,
-                "iTerm.app" => return true,
-                // Unsupported terminals
-                "WezTerm" => return false,
-                "Alacritty" => return false,
-                _ => {}
-            }
-        }
+        let term_program = std::env::var("TERM_PROGRAM").ok();
+        let tmux_session_term_program = (term_program.as_deref() == Some("tmux"))
+            .then(tmux_session_term_program)
+            .flatten();
 
-        // Check for Windows Terminal
-        if std::env::var("WT_SESSION").is_ok() {
-            return true;
-        }
-
-        // Check for VTE-based terminals (GNOME Terminal, etc.)
-        if std::env::var("VTE_VERSION").is_ok() {
-            return true;
-        }
-
-        // Default to false for unknown terminals to avoid escape sequence pollution
-        false
+        terminal_environment_supports_osc_9_4(
+            term_program.as_deref(),
+            tmux_session_term_program.as_deref(),
+            std::env::var("WT_SESSION").is_ok(),
+            std::env::var("VTE_VERSION").is_ok(),
+        )
     })
+}
+
+fn terminal_environment_supports_osc_9_4(
+    term_program: Option<&str>,
+    tmux_session_term_program: Option<&str>,
+    has_wt_session: bool,
+    has_vte_version: bool,
+) -> bool {
+    match term_program {
+        Some("tmux") => {
+            // These variables are available in the pane and are more specific
+            // than a TERM_PROGRAM value tmux may have saved for another client.
+            if has_wt_session || has_vte_version {
+                return true;
+            }
+
+            tmux_session_term_program
+                .and_then(terminal_program_supports_osc_9_4)
+                .unwrap_or(false)
+        }
+        Some(term_program) => terminal_program_supports_osc_9_4(term_program)
+            .unwrap_or(has_wt_session || has_vte_version),
+        None => has_wt_session || has_vte_version,
+    }
+}
+
+/// Returns whether a known terminal program supports OSC 9;4.
+///
+/// `None` means the terminal program is not recognized, so callers can use
+/// other terminal-specific environment variables or safely disable OSC output.
+fn terminal_program_supports_osc_9_4(term_program: &str) -> Option<bool> {
+    match term_program {
+        // Supported terminals
+        "ghostty" | "vscode" | "iTerm.app" => Some(true),
+        // Unsupported terminals
+        "WezTerm" | "Alacritty" => Some(false),
+        _ => None,
+    }
+}
+
+/// Returns the terminal program saved in the current tmux session.
+///
+/// tmux replaces pane `TERM_PROGRAM` with `tmux`. This intentionally does not
+/// read the server-wide environment, which may belong to a different client.
+fn tmux_session_term_program() -> Option<String> {
+    let output = std::process::Command::new("tmux")
+        .args(["show-environment", "TERM_PROGRAM"])
+        .output()
+        .ok()?;
+
+    let value = String::from_utf8(output.stdout).ok()?;
+    value
+        .trim()
+        .strip_prefix("TERM_PROGRAM=")
+        .map(str::to_owned)
 }
 
 /// Sends an OSC 9;4 sequence to set terminal progress.
@@ -174,11 +218,29 @@ fn write_progress(state: ProgressState, progress: u8) -> std::io::Result<()> {
     }
 
     let mut stderr = std::io::stderr();
-    // OSC 9;4 format: ESC ] 9 ; 4 ; <state> ; <progress> BEL
+    // OSC 9;4 format: ESC ] 9 ; 4 ; <state> ; <progress> ST
     // Note: The color is controlled by the terminal theme
     // Ghostty may show cyan automatically for normal progress
-    write!(stderr, "\x1b]9;4;{};{}\x1b\\", state.as_code(), progress)?;
+    let sequence = progress_sequence(state, progress, is_inside_tmux());
+    stderr.write_all(sequence.as_bytes())?;
     stderr.flush()
+}
+
+/// Reports whether this process is running inside a tmux pane.
+fn is_inside_tmux() -> bool {
+    std::env::var_os("TMUX").is_some_and(|tmux| !tmux.is_empty())
+}
+
+/// Builds an OSC 9;4 sequence, optionally wrapped for tmux passthrough.
+fn progress_sequence(state: ProgressState, progress: u8, tmux_passthrough: bool) -> String {
+    let sequence = format!("\x1b]9;4;{};{}\x1b\\", state.as_code(), progress);
+
+    if tmux_passthrough {
+        // tmux DCS passthrough requires every ESC in its payload to be doubled.
+        format!("\x1bPtmux;{}\x1b\\", sequence.replace('\x1b', "\x1b\x1b"))
+    } else {
+        sequence
+    }
 }
 
 /// Clears any terminal progress indicator.
@@ -201,6 +263,97 @@ mod tests {
         assert_eq!(ProgressState::Error.as_code(), 2);
         assert_eq!(ProgressState::Indeterminate.as_code(), 3);
         assert_eq!(ProgressState::Warning.as_code(), 4);
+    }
+
+    #[test]
+    fn test_terminal_program_support() {
+        assert_eq!(terminal_program_supports_osc_9_4("ghostty"), Some(true));
+        assert_eq!(terminal_program_supports_osc_9_4("vscode"), Some(true));
+        assert_eq!(terminal_program_supports_osc_9_4("iTerm.app"), Some(true));
+        assert_eq!(terminal_program_supports_osc_9_4("WezTerm"), Some(false));
+        assert_eq!(terminal_program_supports_osc_9_4("Alacritty"), Some(false));
+        assert_eq!(terminal_program_supports_osc_9_4("tmux"), None);
+        assert_eq!(terminal_program_supports_osc_9_4("unknown"), None);
+    }
+
+    #[test]
+    fn test_terminal_environment_support() {
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("ghostty"),
+            None,
+            false,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("Alacritty"),
+            None,
+            false,
+            false
+        ));
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            Some("iTerm.app"),
+            false,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            Some("Alacritty"),
+            false,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            None,
+            false,
+            false
+        ));
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            Some("Alacritty"),
+            false,
+            true
+        ));
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("tmux"),
+            Some("Alacritty"),
+            true,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("WezTerm"),
+            None,
+            true,
+            false
+        ));
+        assert!(!terminal_environment_supports_osc_9_4(
+            Some("Alacritty"),
+            None,
+            false,
+            true
+        ));
+        assert!(terminal_environment_supports_osc_9_4(
+            Some("unknown"),
+            None,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_progress_sequence_without_tmux_is_raw_osc() {
+        assert_eq!(
+            progress_sequence(ProgressState::Normal, 75, false),
+            "\x1b]9;4;1;75\x1b\\"
+        );
+    }
+
+    #[test]
+    fn test_progress_sequence_with_tmux_uses_passthrough() {
+        assert_eq!(
+            progress_sequence(ProgressState::Normal, 75, true),
+            "\x1bPtmux;\x1b\x1b]9;4;1;75\x1b\x1b\\\x1b\\"
+        );
     }
 
     #[test]
