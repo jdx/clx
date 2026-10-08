@@ -51,6 +51,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
 
+  hk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          install_args: hk pkl jactionlint
+      - run: mise x hk -- hk check --all
+
   # Aggregator that required-status-checks can target. If any upstream job
   # failed or was skipped, this job fails so branch protection only needs one
   # stable check name.
@@ -59,6 +73,7 @@ jobs:
       - ci
       - msrv
       - semver
+      - hk
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions: {}
