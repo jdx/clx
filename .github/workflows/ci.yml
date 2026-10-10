@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
       - run: mise run ci
   msrv:
     runs-on: ubuntu-latest
@@ -47,7 +47,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
       - run: mise x -- cargo msrv verify
 
   semver:
@@ -71,7 +71,12 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
           install_args: hk pkl jactionlint
+      # Online checks (known-vulnerable actions, impostor commits, stale refs) run
+      # in CI only; locally: JACTIONLINT_ONLINE=1 hk check --all
       - run: mise x hk -- hk check --all
+        env:
+          JACTIONLINT_ONLINE: 1
+          GITHUB_TOKEN: ${{ github.token }}
 
   # Aggregator that required-status-checks can target. If any upstream job
   # failed or was skipped, this job fails so branch protection only needs one
