@@ -9,6 +9,6 @@ run = [
 [tools]
 # hk.pkl amends a pinned hk package; the tool itself floats and is resolved by mise.lock.
 hk = { version = "latest", minimum_release_age = "0s" }
-jactionlint = { version = "latest", minimum_release_age = "0s" }
+jactionlint = "2.0.2"
 pkl = { version = "latest", minimum_release_age = "0s" }
 "cargo:cargo-msrv" = "latest"
