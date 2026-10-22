@@ -30,7 +30,8 @@
 //! When progress jobs are running, clx automatically sends OSC 9;4 sequences to
 //! update the terminal's progress indicator. The progress percentage is calculated
 //! from job progress values or estimated from job status. Inside tmux, the sequence
-//! is sent through tmux's passthrough protocol when `TMUX` is set. This requires the
+//! is sent through tmux's passthrough protocol when `TMUX` is set and tmux is the
+//! immediate terminal (not a nested one such as Neovim's `:terminal`). This requires the
 //! user to enable tmux's `allow-passthrough` pane option; clx does not change tmux
 //! configuration.
 
@@ -226,9 +227,29 @@ fn write_progress(state: ProgressState, progress: u8) -> std::io::Result<()> {
     stderr.flush()
 }
 
-/// Reports whether this process is running inside a tmux pane.
+/// Reports whether stderr's immediate terminal is a tmux pane.
+///
+/// `TMUX` is inherited by everything started inside a pane, including nested
+/// terminal emulators such as Neovim's `:terminal`, which don't understand the
+/// passthrough wrapper and would print its payload literally.
 fn is_inside_tmux() -> bool {
-    std::env::var_os("TMUX").is_some_and(|tmux| !tmux.is_empty())
+    let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
+    tmux_is_immediate_terminal(
+        var("TMUX").is_some(),
+        var("TERM").as_deref(),
+        var("NVIM").is_some() || var("VIM_TERMINAL").is_some(),
+    )
+}
+
+fn tmux_is_immediate_terminal(tmux_set: bool, term: Option<&str>, in_vim_terminal: bool) -> bool {
+    if !tmux_set {
+        return false;
+    }
+    // A tmux or screen TERM means tmux (re)started inside any nested terminal.
+    if term.is_some_and(|t| t.starts_with("tmux") || t.starts_with("screen")) {
+        return true;
+    }
+    !in_vim_terminal
 }
 
 /// Builds an OSC 9;4 sequence, optionally wrapped for tmux passthrough.
@@ -354,6 +375,38 @@ mod tests {
             progress_sequence(ProgressState::Normal, 75, true),
             "\x1bPtmux;\x1b\x1b]9;4;1;75\x1b\x1b\\\x1b\\"
         );
+    }
+
+    #[test]
+    fn test_tmux_immediate_terminal() {
+        assert!(!tmux_is_immediate_terminal(
+            false,
+            Some("tmux-256color"),
+            false
+        ));
+        assert!(tmux_is_immediate_terminal(
+            true,
+            Some("tmux-256color"),
+            false
+        ));
+        assert!(tmux_is_immediate_terminal(
+            true,
+            Some("xterm-256color"),
+            false
+        ));
+        assert!(tmux_is_immediate_terminal(true, None, false));
+        // Neovim's :terminal inside tmux inherits TMUX but sets TERM=xterm-256color
+        assert!(!tmux_is_immediate_terminal(
+            true,
+            Some("xterm-256color"),
+            true
+        ));
+        // tmux started inside Neovim's :terminal is tmux again
+        assert!(tmux_is_immediate_terminal(
+            true,
+            Some("screen-256color"),
+            true
+        ));
     }
 
     #[test]
