@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.5](https://github.com/jdx/clx/compare/v3.0.4...v3.0.5) - 2026-10-23
+
+### Fixed
+
+- *(osc)* skip tmux passthrough when a nested terminal is the immediate terminal ([#147](https://github.com/jdx/clx/pull/147))
+
 ## [3.0.4](https://github.com/jdx/clx/compare/v3.0.3...v3.0.4) - 2026-10-06
 
 ### Fixed
