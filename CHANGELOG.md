@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.6](https://github.com/jdx/clx/compare/v3.0.5...v3.0.6) - 2026-10-30
+
+### Other
+
+- *(deps)* update rust crate vt100 to 0.18.0 ([#154](https://github.com/jdx/clx/pull/154))
+
 ## [3.0.5](https://github.com/jdx/clx/compare/v3.0.4...v3.0.5) - 2026-10-23
 
 ### Fixed
