@@ -2,6 +2,7 @@
 #![cfg(unix)]
 
 use std::io::Read;
+use std::num::NonZero;
 use std::thread;
 use std::time::Duration;
 
@@ -73,7 +74,11 @@ fn run_scenario(rows: u16) -> Vec<String> {
 
     assert!(status.success(), "child scenario failed: {status}");
 
-    let mut parser = vt100::Parser::new(rows, 80, 1000);
+    let mut parser = vt100::Parser::new(
+        NonZero::new(rows).expect("rows is non-zero"),
+        NonZero::new(80).expect("cols is non-zero"),
+        1000,
+    );
     parser.process(&output);
     let screen = parser.screen_mut();
     screen.set_scrollback(usize::MAX);
