@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.6](https://github.com/jdx/clx/compare/v3.0.5...v3.0.6) - 2026-11-28
+
+### Fixed
+
+- *(deps)* update rust crate nix to 0.32 ([#170](https://github.com/jdx/clx/pull/170))
+
+### Other
+
+- fix beta clippy lints ([#171](https://github.com/jdx/clx/pull/171))
+- *(deps)* lock file maintenance ([#167](https://github.com/jdx/clx/pull/167))
+- *(deps)* lock file maintenance ([#161](https://github.com/jdx/clx/pull/161))
+- *(deps)* lock file maintenance ([#157](https://github.com/jdx/clx/pull/157))
+- *(deps)* update rust crate vt100 to 0.18.0 ([#154](https://github.com/jdx/clx/pull/154))
+
 ## [3.0.5](https://github.com/jdx/clx/compare/v3.0.4...v3.0.5) - 2026-10-23
 
 ### Fixed
