@@ -512,25 +512,24 @@ pub(crate) fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
 
     // If the first top-level job has explicit progress, use overall_progress()
     // which accounts for multi-operation tracking
-    if let Some((current, total)) = jobs[0].overall_progress() {
-        if total > 0 {
-            let overall_percentage =
-                (current as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as u8;
-            let mut last_pct = LAST_OSC_PERCENTAGE.lock().unwrap();
+    if let Some((current, total)) = jobs[0].overall_progress()
+        && total > 0
+    {
+        let overall_percentage = (current as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as u8;
+        let mut last_pct = LAST_OSC_PERCENTAGE.lock().unwrap();
 
-            let has_failed_jobs = check_for_failed_jobs(jobs);
-            let osc_state = if has_failed_jobs {
-                ProgressState::Error
-            } else {
-                ProgressState::Normal
-            };
+        let has_failed_jobs = check_for_failed_jobs(jobs);
+        let osc_state = if has_failed_jobs {
+            ProgressState::Error
+        } else {
+            ProgressState::Normal
+        };
 
-            if *last_pct != Some(overall_percentage) || (has_failed_jobs && last_pct.is_none()) {
-                set_progress(osc_state, overall_percentage);
-                *last_pct = Some(overall_percentage);
-            }
-            return;
+        if *last_pct != Some(overall_percentage) || (has_failed_jobs && last_pct.is_none()) {
+            set_progress(osc_state, overall_percentage);
+            *last_pct = Some(overall_percentage);
         }
+        return;
     }
 
     // Fallback: use averaging algorithm for jobs without explicit progress

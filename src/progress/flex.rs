@@ -189,10 +189,10 @@ fn process_flex_line_by_line(s: &str, width: usize) -> String {
     s.lines()
         .map(|line| {
             // Handle flex_fill in line-by-line mode
-            if line.contains("<clx:flex_fill>") {
-                if let Some(result) = process_line_flex_fill(line, width) {
-                    return result;
-                }
+            if line.contains("<clx:flex_fill>")
+                && let Some(result) = process_line_flex_fill(line, width)
+            {
+                return result;
             }
 
             if !line.contains("<clx:flex>") {
