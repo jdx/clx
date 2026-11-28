@@ -117,9 +117,8 @@ pub fn log_frame(rendered: &str, jobs: &[Arc<ProgressJob>]) {
         jobs: jobs.iter().map(|j| JobSnapshot::from_job(j)).collect(),
     };
 
-    if let Ok(json) = serde_json::to_string(&event) {
-        if let Ok(mut writer) = log_writer.lock() {
+    if let Ok(json) = serde_json::to_string(&event)
+        && let Ok(mut writer) = log_writer.lock() {
             let _ = writeln!(writer, "{}", json);
         }
-    }
 }

@@ -130,7 +130,7 @@ fn calculate_rate_string(
     operation_elapsed_secs: f64,
 ) -> String {
     if let Some((cur, _total)) = progress {
-        let rate = smoothed_rate.unwrap_or_else(|| {
+        let rate = smoothed_rate.unwrap_or({
             if operation_elapsed_secs > 0.0 && cur > 0 {
                 cur as f64 / operation_elapsed_secs
             } else {

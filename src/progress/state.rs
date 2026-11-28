@@ -512,8 +512,8 @@ pub(crate) fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
 
     // If the first top-level job has explicit progress, use overall_progress()
     // which accounts for multi-operation tracking
-    if let Some((current, total)) = jobs[0].overall_progress() {
-        if total > 0 {
+    if let Some((current, total)) = jobs[0].overall_progress()
+        && total > 0 {
             let overall_percentage =
                 (current as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as u8;
             let mut last_pct = LAST_OSC_PERCENTAGE.lock().unwrap();
@@ -531,7 +531,6 @@ pub(crate) fn update_osc_progress(jobs: &[Arc<ProgressJob>]) {
             }
             return;
         }
-    }
 
     // Fallback: use averaging algorithm for jobs without explicit progress
     let (total_progress, job_count, has_failed_jobs) = calculate_average_progress(jobs);

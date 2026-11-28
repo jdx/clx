@@ -24,7 +24,7 @@ fn resize_child_scenario() {
     use clx::progress::{ProgressJobBuilder, ProgressStatus, set_interval};
 
     set_interval(Duration::from_millis(25));
-    let job = ProgressJobBuilder::new().body(&"x".repeat(60)).start();
+    let job = ProgressJobBuilder::new().body("x".repeat(60)).start();
     thread::sleep(Duration::from_secs(4));
     job.set_status(ProgressStatus::Done);
     clx::progress::stop();
@@ -41,7 +41,7 @@ fn cramped_stop_child_scenario() {
     use clx::progress::{ProgressJobBuilder, set_interval};
 
     set_interval(Duration::from_millis(25));
-    let _job = ProgressJobBuilder::new().body(&"x".repeat(60)).start();
+    let _job = ProgressJobBuilder::new().body("x".repeat(60)).start();
     thread::sleep(Duration::from_millis(1500));
     clx::progress::stop();
 
@@ -59,7 +59,7 @@ fn tmux_resize_child_scenario() {
     set_interval(Duration::from_millis(25));
     let _jobs = ["TMUX_ROW_ALPHA", "TMUX_ROW_BRAVO", "TMUX_ROW_CHARLIE"].map(|label| {
         ProgressJobBuilder::new()
-            .body(&format!("{{{{ spinner() }}}} {label}"))
+            .body(format!("{{{{ spinner() }}}} {label}"))
             .start()
     });
     thread::sleep(Duration::from_secs(30));
