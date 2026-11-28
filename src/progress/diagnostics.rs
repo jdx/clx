@@ -118,7 +118,8 @@ pub fn log_frame(rendered: &str, jobs: &[Arc<ProgressJob>]) {
     };
 
     if let Ok(json) = serde_json::to_string(&event)
-        && let Ok(mut writer) = log_writer.lock() {
-            let _ = writeln!(writer, "{}", json);
-        }
+        && let Ok(mut writer) = log_writer.lock()
+    {
+        let _ = writeln!(writer, "{}", json);
+    }
 }
